@@ -1,8 +1,8 @@
 ## @file
 # Routines for generating AutoGen.h and AutoGen.c
 #
-# Copyright (c) 2007 - 2010, Intel Corporation
-# All rights reserved. This program and the accompanying materials
+# Copyright (c) 2007 - 2010, Intel Corporation. All rights reserved.<BR>
+# This program and the accompanying materials
 # are licensed and made available under the terms and conditions of the BSD License
 # which accompanies this distribution.  The full text of the license may be found at
 # http://opensource.org/licenses/bsd-license.php
@@ -1028,7 +1028,9 @@ def CreateModulePcdCode(Info, AutoGenC, AutoGenH, Pcd):
                     ArraySize = ArraySize / 2;
 
                 if ArraySize < (len(Value) + 1):
-                    ArraySize = len(Value) + 1
+                    EdkLogger.error("build", AUTOGEN_ERROR,
+                                    "The maximum size of VOID* type PCD '%s.%s' is less than its actual size occupied." % (Pcd.TokenSpaceGuidCName, Pcd.TokenCName),
+                                    ExtraData="[%s]" % str(Info))
                 Value = NewValue + '0 }'
             Array = '[%d]' % ArraySize
         #
@@ -1227,7 +1229,7 @@ def CreatePcdDatabasePhaseSpecificAutoGen (Platform, Phase):
     NumberOfExTokens = 0
     NumberOfSizeItems = 0
     GuidList = []
-
+    
     for Pcd in Platform.DynamicPcdList:
         CName = Pcd.TokenCName
         TokenSpaceGuidCName = Pcd.TokenSpaceGuidCName
@@ -1263,7 +1265,10 @@ def CreatePcdDatabasePhaseSpecificAutoGen (Platform, Phase):
         Pcd.InitString = 'UNINIT'
 
         if Pcd.DatumType == 'VOID*':
-            Pcd.TokenTypeList = ['PCD_TYPE_STRING']
+            if Pcd.Type not in ["DynamicVpd", "DynamicExVpd"]:
+                Pcd.TokenTypeList = ['PCD_TYPE_STRING']
+            else:
+                Pcd.TokenTypeList = []
         elif Pcd.DatumType == 'BOOLEAN':
             Pcd.TokenTypeList = ['PCD_DATUM_TYPE_UINT8']
         else:
@@ -1329,7 +1334,7 @@ def CreatePcdDatabasePhaseSpecificAutoGen (Platform, Phase):
                 Pcd.TokenTypeList += ['PCD_TYPE_VPD']
                 Pcd.InitString = 'INIT'
                 VpdHeadOffsetList.append(Sku.VpdOffset)
-            
+                continue
           
             if Pcd.DatumType == 'VOID*':
                 Pcd.TokenTypeList += ['PCD_TYPE_STRING']
@@ -1362,8 +1367,11 @@ def CreatePcdDatabasePhaseSpecificAutoGen (Platform, Phase):
                     Dict['SIZE_TABLE_MAXIMUM_LENGTH'].append(Pcd.MaxDatumSize)
                     if Pcd.MaxDatumSize != '':
                         MaxDatumSize = int(Pcd.MaxDatumSize, 0)
-                        if MaxDatumSize > Size:
-                            Size = MaxDatumSize
+                        if MaxDatumSize < Size:
+                            EdkLogger.error("build", AUTOGEN_ERROR,
+                                            "The maximum size of VOID* type PCD '%s.%s' is less than its actual size occupied." % (Pcd.TokenSpaceGuidCName, Pcd.TokenCName),
+                                            ExtraData="[%s]" % str(Platform))
+                        Size = MaxDatumSize
                     Dict['STRING_TABLE_LENGTH'].append(Size)
                     StringTableIndex += 1
                     StringTableSize += (Size)
@@ -1886,7 +1894,7 @@ def CreateUnicodeStringCode(Info, AutoGenC, AutoGenH, UniGenCFlag, UniGenBinBuff
     else:
         ShellMode = False
 
-    Header, Code = GetStringFiles(Info.UnicodeFileList, SrcList, IncList, ['.uni', '.inf'], Info.Name, CompatibleMode, ShellMode, UniGenCFlag, UniGenBinBuffer)
+    Header, Code = GetStringFiles(Info.UnicodeFileList, SrcList, IncList, Info.IncludePathList, ['.uni', '.inf'], Info.Name, CompatibleMode, ShellMode, UniGenCFlag, UniGenBinBuffer)
     if CompatibleMode or UniGenCFlag:
         AutoGenC.Append("\n//\n//Unicode String Pack Definition\n//\n")
         AutoGenC.Append(Code)

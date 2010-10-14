@@ -1,8 +1,8 @@
 ## @file
 # This file is used to define a class object to describe a distribution package
 #
-# Copyright (c) 2008, Intel Corporation
-# All rights reserved. This program and the accompanying materials
+# Copyright (c) 2008, Intel Corporation. All rights reserved.<BR>
+# This program and the accompanying materials
 # are licensed and made available under the terms and conditions of the BSD License
 # which accompanies this distribution.    The full text of the license may be found at
 # http://opensource.org/licenses/bsd-license.php
@@ -150,7 +150,6 @@ class DistributionPackageClass(object):
 # script.
 #
 if __name__ == '__main__':
-    pass
     D = DistributionPackageClass()
     D.GetDistributionPackage(os.getenv('WORKSPACE'), ['MdePkg/MdePkg.dec', 'TianoModulePkg/TianoModulePkg.dec'], ['MdeModulePkg/Application/HelloWorld/HelloWorld.inf'])
     Xml = DistributionPackageXml()

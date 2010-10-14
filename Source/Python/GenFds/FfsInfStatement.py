@@ -1,9 +1,9 @@
 ## @file
 # process FFS generation from INF statement
 #
-#  Copyright (c) 2007 - 2010, Intel Corporation
+#  Copyright (c) 2007 - 2010, Intel Corporation. All rights reserved.<BR>
 #
-#  All rights reserved. This program and the accompanying materials
+#  This program and the accompanying materials
 #  are licensed and made available under the terms and conditions of the BSD License
 #  which accompanies this distribution.  The full text of the license may be found at
 #  http://opensource.org/licenses/bsd-license.php
@@ -80,7 +80,7 @@ class FfsInfStatement(FfsInfStatementClassObject):
         #
 
         PathClassObj = PathClass(self.InfFileName, GenFdsGlobalVariable.WorkSpaceDir)
-        ErrorCode, ErrorInfo = PathClassObj.Validate()
+        ErrorCode, ErrorInfo = PathClassObj.Validate(".inf")
         if ErrorCode != 0:
             EdkLogger.error("GenFds", ErrorCode, ExtraData=ErrorInfo)
         
@@ -343,7 +343,7 @@ class FfsInfStatement(FfsInfStatementClassObject):
         if len(PlatformArchList) == 0:
             self.InDsc = False
             PathClassObj = PathClass(self.InfFileName, GenFdsGlobalVariable.WorkSpaceDir)
-            ErrorCode, ErrorInfo = PathClassObj.Validate()
+            ErrorCode, ErrorInfo = PathClassObj.Validate(".inf")
             if ErrorCode != 0:
                 EdkLogger.error("GenFds", ErrorCode, ExtraData=ErrorInfo)
         if len(ArchList) == 1:

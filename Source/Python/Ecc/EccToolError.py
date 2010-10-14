@@ -1,8 +1,8 @@
 ## @file
 # Standardized Error Hanlding infrastructures.
 #
-# Copyright (c) 2008 - 2010, Intel Corporation
-# All rights reserved. This program and the accompanying materials
+# Copyright (c) 2008 - 2010, Intel Corporation. All rights reserved.<BR>
+# This program and the accompanying materials
 # are licensed and made available under the terms and conditions of the BSD License
 # which accompanies this distribution.  The full text of the license may be found at
 # http://opensource.org/licenses/bsd-license.php
@@ -19,6 +19,7 @@ ERROR_GENERAL_CHECK_NO_ASM = 1004
 ERROR_GENERAL_CHECK_NO_PROGMA = 1005
 ERROR_GENERAL_CHECK_CARRIAGE_RETURN = 1006
 ERROR_GENERAL_CHECK_FILE_EXISTENCE = 1007
+ERROR_GENERAL_CHECK_NON_ACSII = 1008
 
 ERROR_SPACE_CHECK_ALL = 2000
 
@@ -92,6 +93,7 @@ ERROR_META_DATA_FILE_CHECK_DUPLICATE_PROTOCOL = 10012
 ERROR_META_DATA_FILE_CHECK_DUPLICATE_PPI = 10013
 ERROR_META_DATA_FILE_CHECK_MODULE_FILE_NO_USE = 10014
 ERROR_META_DATA_FILE_CHECK_PCD_TYPE = 10015
+ERROR_META_DATA_FILE_CHECK_MODULE_FILE_GUID_DUPLICATION = 10016
 
 ERROR_SPELLING_CHECK_ALL = 11000
 
@@ -104,6 +106,7 @@ gEccErrorMessage = {
     ERROR_GENERAL_CHECK_NO_PROGMA : """There should be no use of "#progma" in source file except "#pragma pack(#)\"""",
     ERROR_GENERAL_CHECK_CARRIAGE_RETURN : "There should be a carriage return at the end of the file",
     ERROR_GENERAL_CHECK_FILE_EXISTENCE : "File not found",
+    ERROR_GENERAL_CHECK_NON_ACSII : "File has invalid Non-ACSII char",
 
     ERROR_SPACE_CHECK_ALL : "",
 
@@ -177,7 +180,7 @@ gEccErrorMessage = {
     ERROR_META_DATA_FILE_CHECK_DUPLICATE_PPI : "Duplicate PPI found",
     ERROR_META_DATA_FILE_CHECK_MODULE_FILE_NO_USE : "No used module files found",
     ERROR_META_DATA_FILE_CHECK_PCD_TYPE : "Wrong C code function used for this kind of PCD",
-
+    ERROR_META_DATA_FILE_CHECK_MODULE_FILE_GUID_DUPLICATION : "Module file has FILE_GUID collision with other module file",
     ERROR_SPELLING_CHECK_ALL : "",
     }
 

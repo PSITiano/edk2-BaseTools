@@ -1,8 +1,8 @@
 ## @file
 # Common routines used by all tools
 #
-# Copyright (c) 2007, Intel Corporation
-# All rights reserved. This program and the accompanying materials
+# Copyright (c) 2007, Intel Corporation. All rights reserved.<BR>
+# This program and the accompanying materials
 # are licensed and made available under the terms and conditions of the BSD License
 # which accompanies this distribution.  The full text of the license may be found at
 # http://opensource.org/licenses/bsd-license.php
@@ -719,7 +719,7 @@ class TemplateString(object):
         while Template:
             MatchObj = gPlaceholderPattern.search(Template, SearchFrom)
             if not MatchObj:
-                if MatchEnd < len(Template):
+                if MatchEnd <= len(Template):
                     TemplateSection = TemplateString.Section(Template[SectionStart:], PlaceHolderList)
                     TemplateSectionList.append(TemplateSection)
                 break
@@ -1172,14 +1172,15 @@ def ParseConsoleLog(Filename):
 #
 def CheckPcdDatum(Type, Value):
     if Type == "VOID*":
-        if not ((Value.startswith('L"') or Value.startswith('"') and Value.endswith('"'))
+        if not (((Value.startswith('L"') or Value.startswith('"')) and Value.endswith('"'))
                 or (Value.startswith('{') and Value.endswith('}'))
                ):
             return False, "Invalid value [%s] of type [%s]; must be in the form of {...} for array"\
                           ", or \"...\" for string, or L\"...\" for unicode string" % (Value, Type)
     elif Type == 'BOOLEAN':
-        if Value not in ['TRUE', 'FALSE']:
-            return False, "Invalid value [%s] of type [%s]; must be TRUE or FALSE" % (Value, Type)
+        if Value not in ['TRUE', 'True', 'true', '0x1', '0x01', '1', 'FALSE', 'False', 'false', '0x0', '0x00', '0']:
+            return False, "Invalid value [%s] of type [%s]; must be one of TRUE, True, true, 0x1, 0x01, 1"\
+                          ", FALSE, False, false, 0x0, 0x00, 0" % (Value, Type)
     elif type(Value) == type(""):
         try:
             Value = long(Value, 0)
@@ -1322,7 +1323,12 @@ class PathClass(object):
 
         RealFile, RealRoot = RealPath2(self.File, self.Root, self.AlterRoot)
         if not RealRoot and not RealFile:
-            return FILE_NOT_FOUND, self.File
+            RealFile = self.File
+            if self.AlterRoot:
+                RealFile = os.path.join(self.AlterRoot, self.File)
+            elif self.Root:
+                RealFile = os.path.join(self.Root, self.File)
+            return FILE_NOT_FOUND, os.path.join(self.AlterRoot, RealFile)
 
         ErrorCode = 0
         ErrorInfo = ''

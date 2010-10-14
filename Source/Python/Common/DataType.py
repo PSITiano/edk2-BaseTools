@@ -1,8 +1,8 @@
 ## @file
 # This file is used to define common static strings used by INF/DEC/DSC files
 #
-# Copyright (c) 2007 ~ 2008, Intel Corporation
-# All rights reserved. This program and the accompanying materials
+# Copyright (c) 2007 - 2008, Intel Corporation. All rights reserved.<BR>
+# This program and the accompanying materials
 # are licensed and made available under the terms and conditions of the BSD License
 # which accompanies this distribution.  The full text of the license may be found at
 # http://opensource.org/licenses/bsd-license.php
@@ -334,6 +334,7 @@ TAB_DEC_DEFINES_DEC_SPECIFICATION = 'DEC_SPECIFICATION'
 TAB_DEC_DEFINES_PACKAGE_NAME = 'PACKAGE_NAME'
 TAB_DEC_DEFINES_PACKAGE_GUID = 'PACKAGE_GUID'
 TAB_DEC_DEFINES_PACKAGE_VERSION = 'PACKAGE_VERSION'
+TAB_DEC_DEFINES_PKG_UNI_FILE = 'PKG_UNI_FILE'
 
 #
 # Dsc Definitions
@@ -353,6 +354,7 @@ TAB_DSC_DEFINES_MAKEFILE_NAME = 'MAKEFILE_NAME'
 TAB_DSC_DEFINES_BS_BASE_ADDRESS = 'BsBaseAddress'
 TAB_DSC_DEFINES_RT_BASE_ADDRESS = 'RtBaseAddress'
 TAB_DSC_DEFINES_DEFINE = 'DEFINE'
+TAB_DSC_DEFINES_VPD_TOOL_GUID = 'VPD_TOOL_GUID'
 TAB_FIX_LOAD_TOP_MEMORY_ADDRESS = 'FIX_LOAD_TOP_MEMORY_ADDRESS'
 
 #
@@ -361,7 +363,6 @@ TAB_FIX_LOAD_TOP_MEMORY_ADDRESS = 'FIX_LOAD_TOP_MEMORY_ADDRESS'
 TAB_TAT_DEFINES_ACTIVE_PLATFORM = 'ACTIVE_PLATFORM'
 TAB_TAT_DEFINES_ACTIVE_MODULE = 'ACTIVE_MODULE'
 TAB_TAT_DEFINES_TOOL_CHAIN_CONF = 'TOOL_CHAIN_CONF'
-TAB_TAT_DEFINES_MULTIPLE_THREAD = 'MULTIPLE_THREAD'
 TAB_TAT_DEFINES_MAX_CONCURRENT_THREAD_NUMBER = 'MAX_CONCURRENT_THREAD_NUMBER'
 TAB_TAT_DEFINES_TARGET = 'TARGET'
 TAB_TAT_DEFINES_TOOL_CHAIN_TAG = 'TOOL_CHAIN_TAG'

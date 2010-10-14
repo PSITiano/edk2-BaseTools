@@ -1,8 +1,8 @@
 ## @file
 # This file is used to define common string related functions used in parsing process
 #
-# Copyright (c) 2007 ~ 2008, Intel Corporation
-# All rights reserved. This program and the accompanying materials
+# Copyright (c) 2007 - 2008, Intel Corporation. All rights reserved.<BR>
+# This program and the accompanying materials
 # are licensed and made available under the terms and conditions of the BSD License
 # which accompanies this distribution.  The full text of the license may be found at
 # http://opensource.org/licenses/bsd-license.php
@@ -22,6 +22,9 @@ import EdkLogger as EdkLogger
 
 from GlobalData import *
 from BuildToolError import *
+
+gHexVerPatt = re.compile('0x[a-f0-9]{4}[a-f0-9]{4}$',re.IGNORECASE)
+gHumanReadableVerPatt = re.compile(r'([1-9][0-9]*|0)\.[0-9]{1,2}$')
 
 ## GetSplitValueList
 #
@@ -279,15 +282,66 @@ def CleanString(Line, CommentCharacter = DataType.TAB_COMMENT_SPLIT, AllowCppSty
     if AllowCppStyleComment:
         Line = Line.replace(DataType.TAB_COMMENT_R8_SPLIT, CommentCharacter)
     #
-    # remove comments
+    # remove comments, but we should escape comment character in string
     #
-    Line = Line.split(CommentCharacter, 1)[0];
+    InString = False
+    for Index in range(0, len(Line)):
+        if Line[Index] == '"':
+            InString = not InString
+        elif Line[Index] == CommentCharacter and not InString:
+            Line = Line[0: Index]
+            break
+    
     #
     # remove whitespace again
     #
     Line = Line.strip();
 
     return Line
+
+## CleanString2
+#
+# Split comments in a string
+# Remove spaces
+#
+# @param Line:              The string to be cleaned
+# @param CommentCharacter:  Comment char, used to ignore comment content, default is DataType.TAB_COMMENT_SPLIT
+#
+# @retval Path Formatted path
+#
+def CleanString2(Line, CommentCharacter = DataType.TAB_COMMENT_SPLIT, AllowCppStyleComment=False):
+    #
+    # remove whitespace
+    #
+    Line = Line.strip();
+    #
+    # Replace R8's comment character
+    #
+    if AllowCppStyleComment:
+        Line = Line.replace(DataType.TAB_COMMENT_R8_SPLIT, CommentCharacter)
+    #
+    # separate comments and statements
+    #
+    LineParts = Line.split(CommentCharacter, 1);
+    #
+    # remove whitespace again
+    #
+    Line = LineParts[0].strip();
+    if len(LineParts) > 1:
+        Comment = LineParts[1].strip()
+        # Remove prefixed and trailing comment characters
+        Start = 0
+        End = len(Comment)
+        while Start < End and Comment.startswith(CommentCharacter, Start, End):
+            Start += 1
+        while End >= 0 and Comment.endswith(CommentCharacter, Start, End):
+            End -= 1
+        Comment = Comment[Start:End]
+        Comment = Comment.strip()
+    else:
+        Comment = ''
+
+    return Line, Comment
 
 ## GetMultipleValuesOfKeyFromLines
 #
@@ -325,6 +379,34 @@ def GetMultipleValuesOfKeyFromLines(Lines, Key, KeyValues, CommentCharacter):
 def GetDefineValue(String, Key, CommentCharacter):
     String = CleanString(String)
     return String[String.find(Key + ' ') + len(Key + ' ') : ]
+
+## GetHexVerValue
+#
+# Get a Hex Version Value
+#
+# @param VerString:         The version string to be parsed
+#
+#
+# @retval:      If VerString is incorrectly formatted, return "None" which will break the build.
+#               If VerString is correctly formatted, return a Hex value of the Version Number (0xmmmmnnnn)
+#                   where mmmm is the major number and nnnn is the adjusted minor number.
+#
+def GetHexVerValue(VerString):
+    VerString = CleanString(VerString)
+
+    if gHumanReadableVerPatt.match(VerString):
+        ValueList = VerString.split('.')
+        Major = ValueList[0]
+        Minor = ValueList[1]
+        if len(Minor) == 1:
+            Minor += '0'
+        DeciValue = (int(Major) << 16) + int(Minor);
+        return "0x%08x"%DeciValue
+    elif gHexVerPatt.match(VerString):
+        return VerString
+    else:
+        return None
+
 
 ## GetSingleValueOfKeyFromLines
 #

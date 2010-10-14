@@ -1,9 +1,9 @@
 ## @file
 # build a platform or a module
 #
-#  Copyright (c) 2007 - 2010, Intel Corporation
+#  Copyright (c) 2007 - 2010, Intel Corporation. All rights reserved.<BR>
 #
-#  All rights reserved. This program and the accompanying materials
+#  This program and the accompanying materials
 #  are licensed and made available under the terms and conditions of the BSD License
 #  which accompanies this distribution.  The full text of the license may be found at
 #  http://opensource.org/licenses/bsd-license.php
@@ -23,6 +23,7 @@ import glob
 import time
 import platform
 import traceback
+import encodings.ascii 
 
 from struct import *
 from threading import *
@@ -304,7 +305,7 @@ class BuildUnit:
 
     ## str() method
     #
-    #   It just returns the string representaion of self.BuildObject
+    #   It just returns the string representation of self.BuildObject
     #
     #   @param  self        The object pointer
     #
@@ -735,7 +736,7 @@ class Build():
         self.LoadFixAddress = 0
         self.UniFlag        = UniFlag
 
-        # print dot charater during doing some time-consuming work
+        # print dot character during doing some time-consuming work
         self.Progress = Utils.Progressor()
 
         # parse target.txt, tools_def.txt, and platform file
@@ -942,7 +943,7 @@ class Build():
 
     ## Build a module or platform
     #
-    # Create autogen code and makfile for a module or platform, and the launch
+    # Create autogen code and makefile for a module or platform, and the launch
     # "make" command to build it
     #
     #   @param  Target                      The target of build command
@@ -1267,9 +1268,9 @@ class Build():
         if len (SmmModuleList) > 0:
             MapBuffer.write('SMM_CODE_PAGE_NUMBER      = 0x%x\n' % (SmmSize/0x1000))
         
-        PeiBaseAddr = TopMemoryAddress - RtSize - BtSize
+        PeiBaseAddr = TopMemoryAddress - RtSize - BtSize 
         BtBaseAddr  = TopMemoryAddress - RtSize
-        RtBaseAddr  = TopMemoryAddress - ReservedRuntimeMemorySize
+        RtBaseAddr  = TopMemoryAddress - ReservedRuntimeMemorySize 
 
         self._RebaseModule (MapBuffer, PeiBaseAddr, PeiModuleList, TopMemoryAddress == 0)
         self._RebaseModule (MapBuffer, BtBaseAddr, BtModuleList, TopMemoryAddress == 0)
@@ -1289,12 +1290,10 @@ class Build():
         #
         # Save address map into MAP file.
         #
-        MapFile = open(MapFilePath, "wb")
-        MapFile.write(MapBuffer.getvalue())
-        MapFile.close()
+        SaveFileOnChange(MapFilePath, MapBuffer.getvalue(), False)
         MapBuffer.close()
         if self.LoadFixAddress != 0:
-            sys.stdout.write ("\nLoad Module At Fix Address Map file saved to %s\n" %(MapFilePath))
+            sys.stdout.write ("\nLoad Module At Fix Address Map file can be found at %s\n" %(MapFilePath))
         sys.stdout.flush()
 
     ## Build active platform for different build targets and different tool chains

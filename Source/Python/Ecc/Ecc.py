@@ -1,8 +1,8 @@
 ## @file
 # This file is used to be the main entrance of ECC tool
 #
-# Copyright (c) 2009 - 2010, Intel Corporation
-# All rights reserved. This program and the accompanying materials
+# Copyright (c) 2009 - 2010, Intel Corporation. All rights reserved.<BR>
+# This program and the accompanying materials
 # are licensed and made available under the terms and conditions of the BSD License
 # which accompanies this distribution.  The full text of the license may be found at
 # http://opensource.org/licenses/bsd-license.php
@@ -106,6 +106,8 @@ class Ecc(object):
                 self.BuildMetaDataFileDatabase()
 
         EccGlobalData.gIdentifierTableList = GetTableList((MODEL_FILE_C, MODEL_FILE_H), 'Identifier', EccGlobalData.gDb)
+        EccGlobalData.gCFileList = GetFileList(MODEL_FILE_C, EccGlobalData.gDb)
+        EccGlobalData.gHFileList = GetFileList(MODEL_FILE_H, EccGlobalData.gDb)
 
     ## BuildMetaDataFileDatabase
     #
@@ -227,7 +229,7 @@ class Ecc(object):
 
         if Options.Workspace:
             os.environ["WORKSPACE"] = Options.Workspace
-            
+
         # Check workspace envirnoment
         if "WORKSPACE" not in os.environ:
             EdkLogger.error("ECC", BuildToolError.ATTRIBUTE_NOT_AVAILABLE, "Environment variable not found",
