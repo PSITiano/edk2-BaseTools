@@ -561,22 +561,24 @@ CFormPkg::DeclarePendingQuestion (
   CHAR8          *VarStr;
   UINT32         ArrayIdx;
   CHAR8          FName[MAX_NAME_LEN];
+  CHAR8          *SName;
+  CHAR8          *NewStr;
   EFI_VFR_RETURN_CODE  ReturnCode;
   EFI_VFR_VARSTORE_TYPE VarStoreType  = EFI_VFR_VARSTORE_INVALID;
 
+  //
+  // Declare all questions as Numeric in DisableIf True
+  //
+  // DisableIf
+  CIfrDisableIf DIObj;
+  DIObj.SetLineNo (LineNo);
+  
+  //TrueOpcode
+  CIfrTrue TObj (LineNo);
+
+  // Declare Numeric qeustion for each undefined question.
   for (pNode = PendingAssignList; pNode != NULL; pNode = pNode->mNext) {
     if (pNode->mFlag == PENDING) {
-      //
-      //  declare this question as Numeric in SuppressIf True
-      //
-      // SuppressIf
-      CIfrSuppressIf SIObj;
-      SIObj.SetLineNo (LineNo);
-      
-      //TrueOpcode
-      CIfrTrue TObj (LineNo);
-      
-      //Numeric qeustion
       CIfrNumeric CNObj;
       EFI_VARSTORE_INFO Info; 
   	  EFI_QUESTION_ID   QId   = EFI_QUESTION_ID_INVALID;
@@ -639,7 +641,16 @@ CFormPkg::DeclarePendingQuestion (
           ReturnCode = lCVfrDataStorage.GetEfiVarStoreInfo (&Info);
         } else if (VarStoreType == EFI_VFR_VARSTORE_BUFFER) {
           VarStr = pNode->mKey;
-          ReturnCode = lCVfrVarDataTypeDB.GetDataFieldInfo (VarStr, Info.mInfo.mVarOffset, Info.mVarType, Info.mVarTotalSize);
+          //convert VarStr with store name to VarStr with structure name
+          ReturnCode = lCVfrDataStorage.GetBufferVarStoreDataTypeName (FName, &SName);
+          if (ReturnCode == VFR_RETURN_SUCCESS) {
+            NewStr = new CHAR8[strlen (VarStr) + strlen (SName) + 1];
+            NewStr[0] = '\0';
+            strcpy (NewStr, SName);
+            strcat (NewStr, VarStr + strlen (FName));
+            ReturnCode = lCVfrVarDataTypeDB.GetDataFieldInfo (NewStr, Info.mInfo.mVarOffset, Info.mVarType, Info.mVarTotalSize);
+            delete NewStr;
+          }
         } else {
           ReturnCode = VFR_RETURN_UNSUPPORTED;
         }
@@ -651,13 +662,39 @@ CFormPkg::DeclarePendingQuestion (
 
       CNObj.SetQuestionId (QId);
       CNObj.SetVarStoreInfo (&Info);
+      //
+      // Numeric doesn't support BOOLEAN data type. 
+      // BOOLEAN type has the same data size to UINT8. 
+      //
+      if (Info.mVarType == EFI_IFR_TYPE_BOOLEAN) {
+        Info.mVarType = EFI_IFR_TYPE_NUM_SIZE_8;
+      }
       CNObj.SetFlags (0, Info.mVarType);
+      //
+      // Use maximum value not to limit the vaild value for the undefined question.
+      //
+      switch (Info.mVarType) {
+      case EFI_IFR_TYPE_NUM_SIZE_64:
+        CNObj.SetMinMaxStepData ((UINT64) 0, (UINT64) -1 , (UINT64) 0);
+        break;
+      case EFI_IFR_TYPE_NUM_SIZE_32:
+        CNObj.SetMinMaxStepData ((UINT32) 0, (UINT32) -1 , (UINT32) 0);
+        break;
+      case EFI_IFR_TYPE_NUM_SIZE_16:
+        CNObj.SetMinMaxStepData ((UINT16) 0, (UINT16) -1 , (UINT16) 0);
+        break;
+      case EFI_IFR_TYPE_NUM_SIZE_8:
+        CNObj.SetMinMaxStepData ((UINT8) 0, (UINT8) -1 , (UINT8) 0);
+        break;
+      default:
+        break;
+      }
 
       //
       // For undefined Efi VarStore type question
       // Append the extended guided opcode to contain VarName
       //
-      if (VarStoreType == EFI_VFR_VARSTORE_EFI) {
+      if (VarStoreType == EFI_VFR_VARSTORE_EFI || VfrCompatibleMode) {
         CIfrVarEqName CVNObj (QId, Info.mInfo.mVarName);
         CVNObj.SetLineNo (LineNo);
       }
@@ -667,13 +704,15 @@ CFormPkg::DeclarePendingQuestion (
       //
       CIfrEnd CEObj; 
       CEObj.SetLineNo (LineNo);
-      //
-      // End for SuppressIf
-      //
-      CIfrEnd SEObj;
-      SEObj.SetLineNo (LineNo);
     }
   }
+
+  //
+  // End for DisableIf
+  //
+  CIfrEnd SEObj;
+  SEObj.SetLineNo (LineNo);
+
   return VFR_RETURN_SUCCESS;
 }
 
@@ -1305,6 +1344,8 @@ static struct {
   { sizeof (EFI_IFR_CATENATE), 0 },            // EFI_IFR_CATENATE_OP
   { sizeof (EFI_IFR_GUID), 0 },                // EFI_IFR_GUID_OP
   { sizeof (EFI_IFR_SECURITY), 0 },            // EFI_IFR_SECURITY_OP - 0x60
+  { sizeof (EFI_IFR_MODAL), 0},                // EFI_IFR_MODAL_OP - 0x61
+  { sizeof (EFI_IFR_REFRESH_ID), 0},           // EFI_IFR_REFRESH_ID_OP - 0x62
 };
 
 #ifdef CIFROBJ_DEUBG
@@ -1327,7 +1368,7 @@ static struct {
   "EFI_IFR_STRING_REF1","EFI_IFR_STRING_REF2",          "EFI_IFR_CONDITIONAL",   "EFI_IFR_QUESTION_REF3",   "EFI_IFR_ZERO",          "EFI_IFR_ONE",
   "EFI_IFR_ONES",       "EFI_IFR_UNDEFINED",            "EFI_IFR_LENGTH",        "EFI_IFR_DUP",             "EFI_IFR_THIS",          "EFI_IFR_SPAN",
   "EFI_IFR_VALUE",      "EFI_IFR_DEFAULT",              "EFI_IFR_DEFAULTSTORE",  "EFI_IFR_FORM_MAP",        "EFI_IFR_CATENATE",      "EFI_IFR_GUID",
-  "EFI_IFR_SECURITY",
+  "EFI_IFR_SECURITY",   "EFI_IFR_MODAL",                "EFI_IFR_REFRESH_ID",
 };
 
 VOID

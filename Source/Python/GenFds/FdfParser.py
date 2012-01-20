@@ -15,6 +15,8 @@
 ##
 # Import Modules
 #
+import re
+
 import Fd
 import Region
 import Fv
@@ -45,6 +47,12 @@ from Common.BuildToolError import *
 from Common import EdkLogger
 from Common.Misc import PathClass
 from Common.String import NormPath
+import Common.GlobalData as GlobalData
+from Common.Expression import *
+from Common import GlobalData
+from Common.String import ReplaceMacro
+
+from Common.Misc import tdict
 
 import re
 import os
@@ -67,11 +75,10 @@ T_CHAR_BACKSLASH, T_CHAR_DOUBLE_QUOTE, T_CHAR_SINGLE_QUOTE, T_CHAR_STAR, T_CHAR_
 
 SEPERATOR_TUPLE = ('=', '|', ',', '{', '}')
 
+RegionSizePattern = re.compile("\s*(?P<base>(?:0x|0X)?[a-fA-F0-9]+)\s*\|\s*(?P<size>(?:0x|0X)?[a-fA-F0-9]+)\s*")
+RegionSizeGuidPattern = re.compile("\s*(?P<base>\w+\.\w+)\s*\|\s*(?P<size>\w+\.\w+)\s*")
+
 IncludeFileList = []
-# Macro passed from command line, which has greatest priority and can NOT be overridden by those in FDF
-InputMacroDict = {}
-# All Macro values when parsing file, not replace existing Macro
-AllMacroList = []
 
 def GetRealFileLine (File, Line):
 
@@ -173,7 +180,10 @@ class FileProfile :
 
         self.PcdDict = {}
         self.InfList = []
-
+        # ECC will use this Dict and List information
+        self.PcdFileLineDict = {}
+        self.InfFileLineList = []
+        
         self.FdDict = {}
         self.FdNameNotSet = False
         self.FvDict = {}
@@ -205,6 +215,13 @@ class FdfParser:
         self.CurrentFvName = None
         self.__Token = ""
         self.__SkippedChars = ""
+
+        # Used to section info
+        self.__CurSection = []
+        # Key: [section name, UI name, arch]
+        # Value: {MACRO_NAME : MACRO_VALUE}
+        self.__MacroDict = tdict(True, 3)
+        self.__PcdDict = {}
 
         self.__WipeOffArea = []
         if GenFdsGlobalVariable.WorkSpaceDir == '':
@@ -316,10 +333,10 @@ class FdfParser:
     #
     def __GetOneChar(self):
         if self.CurrentOffsetWithinLine == len(self.Profile.FileLinesList[self.CurrentLineNumber - 1]) - 1:
-                self.CurrentLineNumber += 1
-                self.CurrentOffsetWithinLine = 0
+            self.CurrentLineNumber += 1
+            self.CurrentOffsetWithinLine = 0
         else:
-                self.CurrentOffsetWithinLine += 1
+            self.CurrentOffsetWithinLine += 1
 
     ## __CurrentChar() method
     #
@@ -368,30 +385,6 @@ class FdfParser:
         self.Profile.FileLinesList = [list(s) for s in self.Profile.FileLinesList]
         self.Profile.FileLinesList[-1].append(' ')
 
-    def __ReplaceMacros(self, Str, File, Line):
-        MacroEnd = 0
-        while Str.find('$(', MacroEnd) >= 0:
-            MacroStart = Str.find('$(', MacroEnd)
-            if Str.find(')', MacroStart) > 0:
-                MacroEnd = Str.find(')', MacroStart)
-                Name = Str[MacroStart + 2 : MacroEnd]
-                Value = None
-                if Name in InputMacroDict:
-                    Value = InputMacroDict[Name]
-
-                else:
-                    for Profile in AllMacroList:
-                        if Profile.FileName == File and Profile.MacroName == Name and Profile.DefinedAtLine <= Line:
-                            Value = Profile.MacroValue
-
-                if Value != None:
-                    Str = Str.replace('$(' + Name + ')', Value)
-                    MacroEnd = MacroStart + len(Value)
-
-            else:
-                raise Warning("Macro not complete", self.FileName, self.CurrentLineNumber)
-        return Str
-
     def __ReplaceFragment(self, StartPos, EndPos, Value = ' '):
         if StartPos[0] == EndPos[0]:
             Offset = StartPos[1]
@@ -433,7 +426,67 @@ class FdfParser:
                           self.FileName, self.CurrentLineNumber)
         MacroName = MacroName[2:-1]
         return MacroName, NotFlag
-    
+
+    def __SetMacroValue(self, Macro, Value):
+        if not self.__CurSection:
+            return
+
+        MacroDict = {}
+        if not self.__MacroDict[self.__CurSection[0], self.__CurSection[1], self.__CurSection[2]]:
+            self.__MacroDict[self.__CurSection[0], self.__CurSection[1], self.__CurSection[2]] = MacroDict
+        else:
+            MacroDict = self.__MacroDict[self.__CurSection[0], self.__CurSection[1], self.__CurSection[2]]
+        MacroDict[Macro] = Value
+
+    def __GetMacroValue(self, Macro):
+        # Highest priority
+        if Macro in GlobalData.gCommandLineDefines:
+            return GlobalData.gCommandLineDefines[Macro]
+        if Macro in GlobalData.gGlobalDefines:
+            return GlobalData.gGlobalDefines[Macro]
+
+        if self.__CurSection:
+            MacroDict = self.__MacroDict[
+                        self.__CurSection[0],
+                        self.__CurSection[1],
+                        self.__CurSection[2]
+            ]
+            if MacroDict and Macro in MacroDict:
+                return MacroDict[Macro]
+
+        # Lowest priority
+        if Macro in GlobalData.gPlatformDefines:
+            return GlobalData.gPlatformDefines[Macro]
+        return None
+
+    def __SectionHeaderParser(self, Section):
+        # [Defines]
+        # [FD.UiName]: use dummy instead if UI name is optional
+        # [FV.UiName]
+        # [Capsule.UiName]
+        # [Rule]: don't take rule section into account, macro is not allowed in this section
+        # [VTF.arch.UiName, arch]
+        # [OptionRom.DriverName]
+        self.__CurSection = []
+        Section = Section.strip()[1:-1].upper().replace(' ', '').strip('.')
+        ItemList = Section.split('.')
+        Item = ItemList[0]
+        if Item == '' or Item == 'RULE':
+            return
+
+        if Item == 'DEFINES':
+            self.__CurSection = ['COMMON', 'COMMON', 'COMMON']
+        elif Item == 'VTF' and len(ItemList) == 3:
+            UiName = ItemList[2]
+            Pos = UiName.find(',')
+            if Pos != -1:
+                UiName = UiName[:Pos]
+            self.__CurSection = ['VTF', UiName, ItemList[1]]
+        elif len(ItemList) > 1:
+            self.__CurSection = [ItemList[0], ItemList[1], 'COMMON']
+        elif len(ItemList) > 0:
+            self.__CurSection = [ItemList[0], 'DUMMY', 'COMMON']
+
     ## PreprocessFile() method
     #
     #   Preprocess file contents, replace comments with spaces.
@@ -516,25 +569,45 @@ class FdfParser:
                 if not self.__GetNextToken():
                     raise Warning("expected include file name", self.FileName, self.CurrentLineNumber)
                 IncFileName = self.__Token
-                if not os.path.isabs(IncFileName):
-                    if IncFileName.startswith('$(WORKSPACE)'):
-                        Str = IncFileName.replace('$(WORKSPACE)', os.environ.get('WORKSPACE'))
-                        if os.path.exists(Str):
-                            if not os.path.isabs(Str):
-                                Str = os.path.abspath(Str)
-                        IncFileName = Str
-                    else:
-                        # file is in the same dir with FDF file
-                        FullFdf = self.FileName
-                        if not os.path.isabs(self.FileName):
-                            FullFdf = os.path.join(os.environ.get('WORKSPACE'), self.FileName)
+                __IncludeMacros = {}
+                for Macro in ['WORKSPACE', 'ECP_SOURCE', 'EFI_SOURCE', 'EDK_SOURCE']:
+                    MacroVal = self.__GetMacroValue(Macro)
+                    if MacroVal:
+                        __IncludeMacros[Macro] = MacroVal
 
-                        IncFileName = os.path.join(os.path.dirname(FullFdf), IncFileName)
+                try:
+                    IncludedFile = NormPath(ReplaceMacro(IncFileName, __IncludeMacros, RaiseError=True))
+                except:
+                    raise Warning("only these system environment variables are permitted to start the path of the included file: "
+                                  "$(WORKSPACE), $(ECP_SOURCE), $(EFI_SOURCE), $(EDK_SOURCE)",
+                                  self.FileName, self.CurrentLineNumber)
+                #
+                # First search the include file under the same directory as FDF file
+                #
+                IncludedFile1 = PathClass(IncludedFile, os.path.dirname(self.FileName))
+                ErrorCode = IncludedFile1.Validate()[0]
+                if ErrorCode != 0:
+                    #
+                    # Then search the include file under the same directory as DSC file
+                    #
+                    PlatformDir = ''
+                    if GenFdsGlobalVariable.ActivePlatform:
+                        PlatformDir = GenFdsGlobalVariable.ActivePlatform.Dir
+                    elif GlobalData.gActivePlatform:
+                        PlatformDir = GlobalData.gActivePlatform.MetaFile.Dir
+                    IncludedFile1 = PathClass(IncludedFile, PlatformDir)
+                    ErrorCode = IncludedFile1.Validate()[0]
+                    if ErrorCode != 0:
+                        #
+                        # Also search file under the WORKSPACE directory
+                        #
+                        IncludedFile1 = PathClass(IncludedFile, GlobalData.gWorkspace)
+                        ErrorCode = IncludedFile1.Validate()[0]
+                        if ErrorCode != 0:
+                            raise Warning("The include file does not exist under below directories: \n%s\n%s\n%s\n"%(os.path.dirname(self.FileName), PlatformDir, GlobalData.gWorkspace), 
+                                          self.FileName, self.CurrentLineNumber)
 
-                if not os.path.exists(os.path.normpath(IncFileName)):
-                    raise Warning("Include file not exists", self.FileName, self.CurrentLineNumber)
-
-                IncFileProfile = IncludeFileProfile(os.path.normpath(IncFileName))
+                IncFileProfile = IncludeFileProfile(IncludedFile1.Path)
 
                 CurrentLine = self.CurrentLineNumber
                 CurrentOffset = self.CurrentOffsetWithinLine
@@ -563,7 +636,16 @@ class FdfParser:
                 self.Profile.FileLinesList[IncludeLine - 1] = ''.join(TempList)
 
         self.Rewind()
-
+        
+    def __GetIfListCurrentItemStat(self, IfList):
+        if len(IfList) == 0:
+            return True
+        
+        for Item in IfList:
+            if Item[1] == False:
+                return False
+        
+        return True
     
     ## PreprocessConditionalStatement() method
     #
@@ -575,82 +657,92 @@ class FdfParser:
     def PreprocessConditionalStatement(self):
         # IfList is a stack of if branches with elements of list [Pos, CondSatisfied, BranchDetermined]
         IfList = []
+        RegionLayoutLine = 0
+        ReplacedLine = -1
         while self.__GetNextToken():
+            # Determine section name and the location dependent macro
+            if self.__GetIfListCurrentItemStat(IfList):
+                if self.__Token.startswith('['):
+                    Header = self.__Token
+                    if not self.__Token.endswith(']'):
+                        self.__SkipToToken(']')
+                        Header += self.__SkippedChars
+                    if Header.find('$(') != -1:
+                        raise Warning("macro cannot be used in section header", self.FileName, self.CurrentLineNumber)
+                    self.__SectionHeaderParser(Header)
+                    continue
+                # Replace macros except in RULE section or out of section
+                elif self.__CurSection and ReplacedLine != self.CurrentLineNumber:
+                    ReplacedLine = self.CurrentLineNumber
+                    self.__UndoToken()
+                    CurLine = self.Profile.FileLinesList[ReplacedLine - 1]
+                    PreIndex = 0
+                    StartPos = CurLine.find('$(', PreIndex)
+                    EndPos = CurLine.find(')', StartPos+2)
+                    while StartPos != -1 and EndPos != -1 and not (self.__Token == '!ifdef' or self.__Token == '!ifndef'):
+                        MacroName = CurLine[StartPos+2 : EndPos]
+                        MacorValue = self.__GetMacroValue(MacroName)
+                        if MacorValue != None:
+                            CurLine = CurLine.replace('$(' + MacroName + ')', MacorValue, 1)
+                            if MacorValue.find('$(') != -1:
+                                PreIndex = StartPos
+                            else:
+                                PreIndex = StartPos + len(MacorValue)
+                        else:
+                            PreIndex = EndPos + 1
+                        StartPos = CurLine.find('$(', PreIndex)
+                        EndPos = CurLine.find(')', StartPos+2)
+                    self.Profile.FileLinesList[ReplacedLine - 1] = CurLine
+                    continue
+
             if self.__Token == 'DEFINE':
-                DefineLine = self.CurrentLineNumber - 1
-                DefineOffset = self.CurrentOffsetWithinLine - len('DEFINE')
-                if not self.__GetNextToken():
-                    raise Warning("expected Macro name", self.FileName, self.CurrentLineNumber)
-                Macro = self.__Token
+                if self.__GetIfListCurrentItemStat(IfList):
+                    if not self.__CurSection:
+                        raise Warning("macro cannot be defined in Rule section or out of section", self.FileName, self.CurrentLineNumber)
+                    DefineLine = self.CurrentLineNumber - 1
+                    DefineOffset = self.CurrentOffsetWithinLine - len('DEFINE')
+                    if not self.__GetNextToken():
+                        raise Warning("expected Macro name", self.FileName, self.CurrentLineNumber)
+                    Macro = self.__Token
+                    if not self.__IsToken( "="):
+                        raise Warning("expected '='", self.FileName, self.CurrentLineNumber)
+    
+                    Value = self.__GetExpression()
+                    self.__SetMacroValue(Macro, Value)
+                    self.__WipeOffArea.append(((DefineLine, DefineOffset), (self.CurrentLineNumber - 1, self.CurrentOffsetWithinLine - 1)))
+            elif self.__Token == 'SET':
+                PcdPair = self.__GetNextPcdName()
+                PcdName = "%s.%s" % (PcdPair[1], PcdPair[0])
                 if not self.__IsToken( "="):
                     raise Warning("expected '='", self.FileName, self.CurrentLineNumber)
 
-                if not self.__GetNextToken():
-                    raise Warning("expected value", self.FileName, self.CurrentLineNumber)
+                Value = self.__GetExpression()
+                Value = self.__EvaluateConditional(Value, self.CurrentLineNumber, 'eval', True)
 
-                if self.__GetStringData():
-                    pass
-                Value = self.__Token
-                if not Macro in InputMacroDict:
-                    FileLineTuple = GetRealFileLine(self.FileName, DefineLine + 1)
-                    MacProfile = MacroProfile(FileLineTuple[0], FileLineTuple[1])
-                    MacProfile.MacroName = Macro
-                    MacProfile.MacroValue = Value
-                    AllMacroList.append(MacProfile)
-                self.__WipeOffArea.append(((DefineLine, DefineOffset), (self.CurrentLineNumber - 1, self.CurrentOffsetWithinLine - 1)))
-
+                self.__PcdDict[PcdName] = Value
             elif self.__Token in ('!ifdef', '!ifndef', '!if'):
                 IfStartPos = (self.CurrentLineNumber - 1, self.CurrentOffsetWithinLine - len(self.__Token))
                 IfList.append([IfStartPos, None, None])
+
                 CondLabel = self.__Token
+                Expression = self.__GetExpression()
                 
-                MacroName, NotFlag = self.__GetMacroName() 
-                NotDefineFlag = False
-                if CondLabel == '!ifndef':
-                    NotDefineFlag = True
-                if CondLabel == '!ifdef' or CondLabel == '!ifndef':
-                    if NotFlag:
-                        raise Warning("'NOT' operation not allowed for Macro name", self.FileName, self.CurrentLineNumber)
-
                 if CondLabel == '!if':
-
-                    if not self.__GetNextOp():
-                        raise Warning("expected !endif", self.FileName, self.CurrentLineNumber)
-
-                    if self.__Token in ('!=', '==', '>', '<', '>=', '<='):
-                        Op = self.__Token
-                        if not self.__GetNextToken():
-                            raise Warning("expected value", self.FileName, self.CurrentLineNumber)
-                        if self.__GetStringData():
-                            pass
-                        MacroValue = self.__Token
-                        ConditionSatisfied = self.__EvaluateConditional(MacroName, IfList[-1][0][0] + 1, Op, MacroValue)
-                        if NotFlag:
-                            ConditionSatisfied = not ConditionSatisfied
-                        BranchDetermined = ConditionSatisfied
-                    else:
-                        self.CurrentOffsetWithinLine -= len(self.__Token)
-                        ConditionSatisfied = self.__EvaluateConditional(MacroName, IfList[-1][0][0] + 1, None, 'Bool')
-                        if NotFlag:
-                            ConditionSatisfied = not ConditionSatisfied
-                        BranchDetermined = ConditionSatisfied
-                    IfList[-1] = [IfList[-1][0], ConditionSatisfied, BranchDetermined]
-                    if ConditionSatisfied:
-                        self.__WipeOffArea.append((IfList[-1][0], (self.CurrentLineNumber - 1, self.CurrentOffsetWithinLine - 1)))
-
+                    ConditionSatisfied = self.__EvaluateConditional(Expression, IfList[-1][0][0] + 1, 'eval')
                 else:
-                    ConditionSatisfied = self.__EvaluateConditional(MacroName, IfList[-1][0][0] + 1)
-                    if NotDefineFlag:
+                    ConditionSatisfied = self.__EvaluateConditional(Expression, IfList[-1][0][0] + 1, 'in')
+                    if CondLabel == '!ifndef':
                         ConditionSatisfied = not ConditionSatisfied
-                    BranchDetermined = ConditionSatisfied
-                    IfList[-1] = [IfList[-1][0], ConditionSatisfied, BranchDetermined]
-                    if ConditionSatisfied:
-                        self.__WipeOffArea.append((IfStartPos, (self.CurrentLineNumber - 1, self.CurrentOffsetWithinLine - 1)))
 
+                BranchDetermined = ConditionSatisfied
+                IfList[-1] = [IfList[-1][0], ConditionSatisfied, BranchDetermined]
+                if ConditionSatisfied:
+                    self.__WipeOffArea.append((IfList[-1][0], (self.CurrentLineNumber - 1, self.CurrentOffsetWithinLine - 1)))                 
             elif self.__Token in ('!elseif', '!else'):
                 ElseStartPos = (self.CurrentLineNumber - 1, self.CurrentOffsetWithinLine - len(self.__Token))
                 if len(IfList) <= 0:
                     raise Warning("Missing !if statement", self.FileName, self.CurrentLineNumber)
+
                 if IfList[-1][1]:
                     IfList[-1] = [ElseStartPos, False, True]
                     self.__WipeOffArea.append((ElseStartPos, (self.CurrentLineNumber - 1, self.CurrentOffsetWithinLine - 1)))
@@ -658,27 +750,8 @@ class FdfParser:
                     self.__WipeOffArea.append((IfList[-1][0], ElseStartPos))
                     IfList[-1] = [ElseStartPos, True, IfList[-1][2]]
                     if self.__Token == '!elseif':
-                        MacroName, NotFlag = self.__GetMacroName() 
-                        if not self.__GetNextOp():
-                            raise Warning("expected !endif", self.FileName, self.CurrentLineNumber)
-
-                        if self.__Token in ('!=', '==', '>', '<', '>=', '<='):
-                            Op = self.__Token
-                            if not self.__GetNextToken():
-                                raise Warning("expected value", self.FileName, self.CurrentLineNumber)
-                            if self.__GetStringData():
-                                pass
-                            MacroValue = self.__Token
-                            ConditionSatisfied = self.__EvaluateConditional(MacroName, IfList[-1][0][0] + 1, Op, MacroValue)
-                            if NotFlag:
-                                ConditionSatisfied = not ConditionSatisfied
-
-                        else:
-                            self.CurrentOffsetWithinLine -= len(self.__Token)
-                            ConditionSatisfied = self.__EvaluateConditional(MacroName, IfList[-1][0][0] + 1, None, 'Bool')
-                            if NotFlag:
-                                ConditionSatisfied = not ConditionSatisfied
-
+                        Expression = self.__GetExpression()
+                        ConditionSatisfied = self.__EvaluateConditional(Expression, IfList[-1][0][0] + 1, 'eval')
                         IfList[-1] = [IfList[-1][0], ConditionSatisfied, IfList[-1][2]]
 
                     if IfList[-1][1]:
@@ -687,115 +760,89 @@ class FdfParser:
                         else:
                             IfList[-1][2] = True
                             self.__WipeOffArea.append((IfList[-1][0], (self.CurrentLineNumber - 1, self.CurrentOffsetWithinLine - 1)))
-
-
             elif self.__Token == '!endif':
+                if len(IfList) <= 0:
+                    raise Warning("Missing !if statement", self.FileName, self.CurrentLineNumber)
                 if IfList[-1][1]:
                     self.__WipeOffArea.append(((self.CurrentLineNumber - 1, self.CurrentOffsetWithinLine - len('!endif')), (self.CurrentLineNumber - 1, self.CurrentOffsetWithinLine - 1)))
                 else:
                     self.__WipeOffArea.append((IfList[-1][0], (self.CurrentLineNumber - 1, self.CurrentOffsetWithinLine - 1)))
 
                 IfList.pop()
+            elif not IfList:    # Don't use PCDs inside conditional directive
+                if self.CurrentLineNumber <= RegionLayoutLine:
+                    # Don't try the same line twice
+                    continue
+                RegionSize = RegionSizePattern.match(self.Profile.FileLinesList[self.CurrentLineNumber - 1])
+                if not RegionSize:
+                    RegionLayoutLine = self.CurrentLineNumber
+                    continue
+                RegionSizeGuid = RegionSizeGuidPattern.match(self.Profile.FileLinesList[self.CurrentLineNumber])
+                if not RegionSizeGuid:
+                    RegionLayoutLine = self.CurrentLineNumber + 1
+                    continue
+                self.__PcdDict[RegionSizeGuid.group('base')] = RegionSize.group('base')
+                self.__PcdDict[RegionSizeGuid.group('size')] = RegionSize.group('size')
+                RegionLayoutLine = self.CurrentLineNumber + 1
 
-
-        if len(IfList) > 0:
+        if IfList:
             raise Warning("Missing !endif", self.FileName, self.CurrentLineNumber)
         self.Rewind()
 
-    def __EvaluateConditional(self, Name, Line, Op = None, Value = None):
+    def __CollectMacroPcd(self):
+        MacroDict = {}
 
+        # PCD macro
+        MacroDict.update(self.__PcdDict)
+
+        # Lowest priority
+        MacroDict.update(GlobalData.gPlatformDefines)
+
+        if self.__CurSection:
+            # Defines macro
+            ScopeMacro = self.__MacroDict['COMMON', 'COMMON', 'COMMON']
+            if ScopeMacro:
+                MacroDict.update(ScopeMacro)
+    
+            # Section macro
+            ScopeMacro = self.__MacroDict[
+                        self.__CurSection[0],
+                        self.__CurSection[1],
+                        self.__CurSection[2]
+            ]
+            if ScopeMacro:
+                MacroDict.update(ScopeMacro)
+
+        MacroDict.update(GlobalData.gGlobalDefines)
+        MacroDict.update(GlobalData.gCommandLineDefines)
+        # Highest priority
+
+        return MacroDict
+
+    def __EvaluateConditional(self, Expression, Line, Op = None, Value = None):
         FileLineTuple = GetRealFileLine(self.FileName, Line)
-        if Name in InputMacroDict:
-            MacroValue = InputMacroDict[Name]
-            if Op == None:
-                if Value == 'Bool' and MacroValue == None or MacroValue.upper() == 'FALSE':
-                    return False
-                return True
-            elif Op == '!=':
-                if Value != MacroValue:
-                    return True
+        MacroPcdDict = self.__CollectMacroPcd()
+        if Op == 'eval':
+            try:
+                if Value:
+                    return ValueExpression(Expression, MacroPcdDict)(True)
                 else:
-                    return False
-            elif Op == '==':
-                if Value == MacroValue:
-                    return True
-                else:
-                    return False
-            else:
-                if (self.__IsHex(Value) or Value.isdigit()) and (self.__IsHex(MacroValue) or (MacroValue != None and MacroValue.isdigit())):
-                    InputVal = long(Value, 0)
-                    MacroVal = long(MacroValue, 0)
-                    if Op == '>':
-                        if MacroVal > InputVal:
-                            return True
-                        else:
-                            return False
-                    elif Op == '>=':
-                        if MacroVal >= InputVal:
-                            return True
-                        else:
-                            return False
-                    elif Op == '<':
-                        if MacroVal < InputVal:
-                            return True
-                        else:
-                            return False
-                    elif Op == '<=':
-                        if MacroVal <= InputVal:
-                            return True
-                        else:
-                            return False
-                    else:
-                        return False
-                else:
-                    raise Warning("Value %s is not a number", self.FileName, Line)
-
-        for Profile in AllMacroList:
-            if Profile.MacroName == Name and Profile.DefinedAtLine <= FileLineTuple[1]:
-                if Op == None:
-                    if Value == 'Bool' and Profile.MacroValue == None or Profile.MacroValue.upper() == 'FALSE':
-                        return False
-                    return True
-                elif Op == '!=':
-                    if Value != Profile.MacroValue:
-                        return True
-                    else:
-                        return False
-                elif Op == '==':
-                    if Value == Profile.MacroValue:
-                        return True
-                    else:
-                        return False
-                else:
-                    if (self.__IsHex(Value) or Value.isdigit()) and (self.__IsHex(Profile.MacroValue) or (Profile.MacroValue != None and Profile.MacroValue.isdigit())):
-                        InputVal = long(Value, 0)
-                        MacroVal = long(Profile.MacroValue, 0)
-                        if Op == '>':
-                            if MacroVal > InputVal:
-                                return True
-                            else:
-                                return False
-                        elif Op == '>=':
-                            if MacroVal >= InputVal:
-                                return True
-                            else:
-                                return False
-                        elif Op == '<':
-                            if MacroVal < InputVal:
-                                return True
-                            else:
-                                return False
-                        elif Op == '<=':
-                            if MacroVal <= InputVal:
-                                return True
-                            else:
-                                return False
-                        else:
-                            return False
-                    else:
-                        raise Warning("Value %s is not a number", self.FileName, Line)
-
-        return False
+                    return ValueExpression(Expression, MacroPcdDict)()
+            except WrnExpression, Excpt:
+                # 
+                # Catch expression evaluation warning here. We need to report
+                # the precise number of line and return the evaluation result
+                #
+                EdkLogger.warn('Parser', "Suspicious expression: %s" % str(Excpt),
+                                File=self.FileName, ExtraData=self.__CurrentLine(), 
+                                Line=Line)
+                return Excpt.result
+            except Exception, Excpt:
+                raise Warning("Invalid expression", *FileLineTuple)
+        else:
+            if Expression.startswith('$(') and Expression[-1] == ')':
+                Expression = Expression[2:-1]            
+            return Expression in MacroPcdDict
 
     ## __IsToken() method
     #
@@ -854,6 +901,16 @@ class FdfParser:
             return True
         return False
 
+    def __GetExpression(self):
+        Line = self.Profile.FileLinesList[self.CurrentLineNumber - 1]
+        Index = len(Line) - 1
+        while Line[Index] in ['\r', '\n']:
+            Index -= 1
+        ExpressionString = self.Profile.FileLinesList[self.CurrentLineNumber - 1][self.CurrentOffsetWithinLine:Index+1]
+        self.CurrentOffsetWithinLine += len(ExpressionString)
+        ExpressionString = ExpressionString.strip()
+        return ExpressionString
+
     ## __GetNextWord() method
     #
     #   Get next C name from file lines
@@ -903,7 +960,7 @@ class FdfParser:
         # Record the token start position, the position of the first non-space char.
         StartPos = self.CurrentOffsetWithinLine
         StartLine = self.CurrentLineNumber
-        while not self.__EndOfLine():
+        while StartLine == self.CurrentLineNumber:
             TempChar = self.__CurrentChar()
             # Try to find the end char that is not a space and not in seperator tuple.
             # That is, when we got a space or any char in the tuple, we got the end of token.
@@ -993,7 +1050,7 @@ class FdfParser:
             # That is, when we got a space or any char in the tuple, we got the end of token.
             if not str(TempChar).isspace() and not TempChar in SEPERATOR_TUPLE:
                 if not self.__UndoOneChar():
-                    break
+                    return
             # if we happen to meet a seperator as the first char, we must proceed to get it.
             # That is, we get a token that is a seperator char. nomally it is the boundary of other tokens.
             elif StartPos == self.CurrentOffsetWithinLine and TempChar in SEPERATOR_TUPLE:
@@ -1176,6 +1233,28 @@ class FdfParser:
     def SetFileBufferPos(self, Pos):
         (self.CurrentLineNumber, self.CurrentOffsetWithinLine) = Pos
 
+    ## Preprocess() method
+    #
+    #   Preprocess comment, conditional directive, include directive, replace macro.
+    #   Exception will be raised if syntax error found
+    #
+    #   @param  self        The object pointer
+    #
+    def Preprocess(self):
+        self.__StringToList()
+        self.PreprocessFile()
+        self.PreprocessIncludeFile()
+        self.__StringToList()
+        self.PreprocessFile()
+        self.PreprocessConditionalStatement()
+        self.__StringToList()
+        for Pos in self.__WipeOffArea:
+            self.__ReplaceFragment(Pos[0], Pos[1])
+        self.Profile.FileLinesList = ["".join(list) for list in self.Profile.FileLinesList]
+
+        while self.__GetDefines():
+            pass
+
     ## ParseFile() method
     #
     #   Parse the file profile buffer to extract fd, fv ... information
@@ -1186,26 +1265,7 @@ class FdfParser:
     def ParseFile(self):
 
         try:
-            self.__StringToList()
-            self.PreprocessFile()
-            self.PreprocessIncludeFile()
-            self.__StringToList()
-            self.PreprocessFile()
-            self.PreprocessConditionalStatement()
-            self.__StringToList()
-            for Pos in self.__WipeOffArea:
-                self.__ReplaceFragment(Pos[0], Pos[1])
-            self.Profile.FileLinesList = ["".join(list) for list in self.Profile.FileLinesList]
-            
-            while self.__GetDefines():
-                pass
-            
-            Index = 0
-            while Index < len(self.Profile.FileLinesList):
-                FileLineTuple = GetRealFileLine(self.FileName, Index + 1)
-                self.Profile.FileLinesList[Index] = self.__ReplaceMacros(self.Profile.FileLinesList[Index], FileLineTuple[0], FileLineTuple[1])
-                Index += 1
-
+            self.Preprocess()
             while self.__GetFd():
                 pass
 
@@ -1277,11 +1337,6 @@ class FdfParser:
             if not self.__GetNextToken() or self.__Token.startswith('['):
                 raise Warning("expected MACRO value", self.FileName, self.CurrentLineNumber)
             Value = self.__Token
-            FileLineTuple = GetRealFileLine(self.FileName, self.CurrentLineNumber)
-            MacProfile = MacroProfile(FileLineTuple[0], FileLineTuple[1])
-            MacProfile.MacroName = Macro
-            MacProfile.MacroValue = Value
-            AllMacroList.append(MacProfile)
 
         return False
 
@@ -1317,6 +1372,8 @@ class FdfParser:
         if FdName == "":
             if len (self.Profile.FdDict) == 0:
                 FdName = GenFdsGlobalVariable.PlatformName
+                if FdName == "" and GlobalData.gActivePlatform:
+                    FdName = GlobalData.gActivePlatform.PlatformName
                 self.Profile.FdNameNotSet = True
             else:
                 raise Warning("expected FdName in [FD.] section", self.FileName, self.CurrentLineNumber)
@@ -1411,6 +1468,8 @@ class FdfParser:
             pcdPair = self.__GetNextPcdName()
             Obj.BaseAddressPcd = pcdPair
             self.Profile.PcdDict[pcdPair] = Obj.BaseAddress
+            FileLineTuple = GetRealFileLine(self.FileName, self.CurrentLineNumber)
+            self.Profile.PcdFileLineDict[pcdPair] = FileLineTuple
 
         if not self.__IsKeyword( "Size"):
             raise Warning("Size missing", self.FileName, self.CurrentLineNumber)
@@ -1427,6 +1486,8 @@ class FdfParser:
             pcdPair = self.__GetNextPcdName()
             Obj.SizePcd = pcdPair
             self.Profile.PcdDict[pcdPair] = Size
+            FileLineTuple = GetRealFileLine(self.FileName, self.CurrentLineNumber)
+            self.Profile.PcdFileLineDict[pcdPair] = FileLineTuple
         Obj.Size = long(Size, 0)
 
         if not self.__IsKeyword( "ErasePolarity"):
@@ -1522,6 +1583,8 @@ class FdfParser:
             PcdPair = self.__GetNextPcdName()
             BlockSizePcd = PcdPair
             self.Profile.PcdDict[PcdPair] = BlockSize
+            FileLineTuple = GetRealFileLine(self.FileName, self.CurrentLineNumber)
+            self.Profile.PcdFileLineDict[PcdPair] = FileLineTuple
         BlockSize = long(BlockSize, 0)
 
         BlockNumber = None
@@ -1605,19 +1668,14 @@ class FdfParser:
             if not self.__IsToken( "="):
                 raise Warning("expected '='", self.FileName, self.CurrentLineNumber)
 
-            if not self.__GetNextToken():
-                raise Warning("expected value", self.FileName, self.CurrentLineNumber)
-
-            Value = self.__Token
-            if Value.startswith("{"):
-                # deal with value with {}
-                if not self.__SkipToToken( "}"):
-                    raise Warning("expected '}'", self.FileName, self.CurrentLineNumber)
-                Value += self.__SkippedChars
+            Value = self.__GetExpression()
+            Value = self.__EvaluateConditional(Value, self.CurrentLineNumber, 'eval', True)
 
             if Obj:
                 Obj.SetVarDict[PcdPair] = Value
             self.Profile.PcdDict[PcdPair] = Value
+            FileLineTuple = GetRealFileLine(self.FileName, self.CurrentLineNumber)
+            self.Profile.PcdFileLineDict[PcdPair] = FileLineTuple
             return True
 
         return False
@@ -1653,9 +1711,13 @@ class FdfParser:
             self.__UndoToken()
             RegionObj.PcdOffset = self.__GetNextPcdName()
             self.Profile.PcdDict[RegionObj.PcdOffset] = "0x%08X" % (RegionObj.Offset + long(Fd.BaseAddress, 0))
+            FileLineTuple = GetRealFileLine(self.FileName, self.CurrentLineNumber)
+            self.Profile.PcdFileLineDict[RegionObj.PcdOffset] = FileLineTuple
             if self.__IsToken( "|"):
                 RegionObj.PcdSize = self.__GetNextPcdName()
                 self.Profile.PcdDict[RegionObj.PcdSize] = "0x%08X" % RegionObj.Size
+                FileLineTuple = GetRealFileLine(self.FileName, self.CurrentLineNumber)
+                self.Profile.PcdFileLineDict[RegionObj.PcdSize] = FileLineTuple
 
             if not self.__GetNextWord():
                 return True
@@ -1678,9 +1740,13 @@ class FdfParser:
             self.__UndoToken()
             self.__GetRegionFileType( RegionObj)
 
-        else:
+        elif self.__Token == "DATA":
             self.__UndoToken()
             self.__GetRegionDataType( RegionObj)
+        else:
+            raise Warning("A valid region type was not found. "
+                          "Valid types are [SET, FV, CAPSULE, FILE, DATA]. This error occurred",
+                          self.FileName, self.CurrentLineNumber)
 
         return True
 
@@ -1915,6 +1981,10 @@ class FdfParser:
             pass
 
         self.__GetSetStatements(FvObj)
+        
+        self.__GetFvBaseAddress(FvObj)
+        
+        self.__GetFvForceRebase(FvObj)
 
         self.__GetFvAlignment(FvObj)
 
@@ -1968,6 +2038,66 @@ class FdfParser:
             raise Warning("Unknown alignment value '%s'" % self.__Token, self.FileName, self.CurrentLineNumber)
         Obj.FvAlignment = self.__Token
         return True
+    
+    ## __GetFvBaseAddress() method
+    #
+    #   Get BaseAddress for FV
+    #
+    #   @param  self        The object pointer
+    #   @param  Obj         for whom FvBaseAddress is got
+    #   @retval True        Successfully find a FvBaseAddress statement
+    #   @retval False       Not able to find a FvBaseAddress statement
+    #
+    def __GetFvBaseAddress(self, Obj):
+
+        if not self.__IsKeyword("FvBaseAddress"):
+            return False
+
+        if not self.__IsToken( "="):
+            raise Warning("expected '='", self.FileName, self.CurrentLineNumber)
+
+        if not self.__GetNextToken():
+            raise Warning("expected FV base address value", self.FileName, self.CurrentLineNumber)
+
+        IsValidBaseAddrValue = re.compile('^0[x|X][0-9a-fA-F]+')
+
+        if not IsValidBaseAddrValue.match(self.__Token.upper()):
+            raise Warning("Unknown FV base address value '%s'" % self.__Token, self.FileName, self.CurrentLineNumber)
+        Obj.FvBaseAddress = self.__Token
+        return True  
+      
+    ## __GetFvForceRebase() method
+    #
+    #   Get FvForceRebase for FV
+    #
+    #   @param  self        The object pointer
+    #   @param  Obj         for whom FvForceRebase is got
+    #   @retval True        Successfully find a FvForceRebase statement
+    #   @retval False       Not able to find a FvForceRebase statement
+    #
+    def __GetFvForceRebase(self, Obj):
+
+        if not self.__IsKeyword("FvForceRebase"):
+            return False
+
+        if not self.__IsToken( "="):
+            raise Warning("expected '='", self.FileName, self.CurrentLineNumber)
+
+        if not self.__GetNextToken():
+            raise Warning("expected FvForceRebase value", self.FileName, self.CurrentLineNumber)
+
+        if self.__Token.upper() not in ["TRUE", "FALSE", "0", "0X0", "0X00", "1", "0X1", "0X01"]:
+            raise Warning("Unknown FvForceRebase value '%s'" % self.__Token, self.FileName, self.CurrentLineNumber)
+        
+        if self.__Token.upper() in ["TRUE", "1", "0X1", "0X01"]:
+            Obj.FvForceRebase = True
+        elif self.__Token.upper() in ["FALSE", "0", "0X0", "0X00"]:
+            Obj.FvForceRebase = False
+        else:
+            Obj.FvForceRebase = None
+           
+        return True
+
 
     ## __GetFvAttributes() method
     #
@@ -2165,6 +2295,8 @@ class FdfParser:
 
         if not ffsInf.InfFileName in self.Profile.InfList:
             self.Profile.InfList.append(ffsInf.InfFileName)
+            FileLineTuple = GetRealFileLine(self.FileName, self.CurrentLineNumber)
+            self.Profile.InfFileLineList.append(FileLineTuple)
 
         if self.__IsToken('|'):
             if self.__IsKeyword('RELOCS_STRIPPED'):
@@ -2173,7 +2305,10 @@ class FdfParser:
                 ffsInf.KeepReloc = True
             else:
                 raise Warning("Unknown reloc strip flag '%s'" % self.__Token, self.FileName, self.CurrentLineNumber)
-
+        
+        ffsInf.CurrentLineNum = self.CurrentLineNumber
+        ffsInf.CurrentLineContent = self.__CurrentLine()
+        
         if ForCapsule:
             capsuleFfs = CapsuleData.CapsuleFfs()
             capsuleFfs.Ffs = ffsInf
@@ -2257,10 +2392,15 @@ class FdfParser:
         if not self.__IsKeyword( "FILE"):
             return False
 
-        FfsFileObj = FfsFileStatement.FileStatement()
-
         if not self.__GetNextWord():
             raise Warning("expected FFS type", self.FileName, self.CurrentLineNumber)
+
+        if ForCapsule and self.__Token == 'DATA':
+            self.__UndoToken()
+            self.__UndoToken()
+            return False
+        
+        FfsFileObj = FfsFileStatement.FileStatement()
         FfsFileObj.FvFileType = self.__Token
 
         if not self.__IsToken( "="):
@@ -2278,7 +2418,10 @@ class FdfParser:
                 self.__Token = 'PCD('+PcdPair[1]+'.'+PcdPair[0]+')'
                 
         FfsFileObj.NameGuid = self.__Token
-
+        
+        FfsFileObj.CurrentLineNum = self.CurrentLineNumber
+        FfsFileObj.CurrentLineContent = self.__CurrentLine()
+        
         self.__GetFilePart( FfsFileObj, MacroDict.copy())
 
         if ForCapsule:
@@ -2370,10 +2513,21 @@ class FdfParser:
         else:
             FfsFileObj.FileName = self.__Token
             if FfsFileObj.FileName.replace('$(WORKSPACE)', '').find('$') == -1:
-                #do case sensitive check for file path
-                ErrorCode, ErrorInfo = PathClass(NormPath(FfsFileObj.FileName), GenFdsGlobalVariable.WorkSpaceDir).Validate()
-                if ErrorCode != 0:
-                    EdkLogger.error("GenFds", ErrorCode, ExtraData=ErrorInfo)
+                #
+                # For file in OUTPUT_DIRECTORY will not check whether it exist or not at AutoGen phase.
+                #
+                if not GlobalData.gAutoGenPhase:
+                    #do case sensitive check for file path
+                    ErrorCode, ErrorInfo = PathClass(NormPath(FfsFileObj.FileName), GenFdsGlobalVariable.WorkSpaceDir).Validate()
+                    if ErrorCode != 0:
+                        EdkLogger.error("GenFds", ErrorCode, ExtraData=ErrorInfo)
+                else:
+                    if not self.__GetMacroValue("OUTPUT_DIRECTORY") in FfsFileObj.FileName:
+                        #do case sensitive check for file path
+                        ErrorCode, ErrorInfo = PathClass(NormPath(FfsFileObj.FileName), GenFdsGlobalVariable.WorkSpaceDir).Validate()
+                        if ErrorCode != 0:
+                            EdkLogger.error("GenFds", ErrorCode, ExtraData=ErrorInfo)                    
+
 
         if not self.__IsToken( "}"):
             raise Warning("expected '}'", self.FileName, self.CurrentLineNumber)
@@ -2876,7 +3030,9 @@ class FdfParser:
             IsInf = self.__GetInfStatement(Obj, True)
             IsFile = self.__GetFileStatement(Obj, True)
             IsFv = self.__GetFvStatement(Obj)
-            if not IsInf and not IsFile and not IsFv:
+            IsFd = self.__GetFdStatement(Obj)
+            IsAnyFile = self.__GetAnyFileStatement(Obj)
+            if not (IsInf or IsFile or IsFv or IsFd or IsAnyFile):
                 break
 
     ## __GetFvStatement() method
@@ -2899,9 +3055,74 @@ class FdfParser:
         if not self.__GetNextToken():
             raise Warning("expected FV name", self.FileName, self.CurrentLineNumber)
 
+        if self.__Token.upper() not in self.Profile.FvDict.keys():
+            raise Warning("FV name does not exist", self.FileName, self.CurrentLineNumber)
+
         CapsuleFv = CapsuleData.CapsuleFv()
         CapsuleFv.FvName = self.__Token
         CapsuleObj.CapsuleDataList.append(CapsuleFv)
+        return True
+
+    ## __GetFdStatement() method
+    #
+    #   Get FD for capsule
+    #
+    #   @param  self        The object pointer
+    #   @param  CapsuleObj  for whom FD is got
+    #   @retval True        Successfully find a FD statement
+    #   @retval False       Not able to find a FD statement
+    #
+    def __GetFdStatement(self, CapsuleObj):
+
+        if not self.__IsKeyword("FD"):
+            return False
+
+        if not self.__IsToken("="):
+            raise Warning("expected '='", self.FileName, self.CurrentLineNumber)
+
+        if not self.__GetNextToken():
+            raise Warning("expected FD name", self.FileName, self.CurrentLineNumber)
+
+        if self.__Token.upper() not in self.Profile.FdDict.keys():
+            raise Warning("FD name does not exist", self.FileName, self.CurrentLineNumber)
+
+        CapsuleFd = CapsuleData.CapsuleFd()
+        CapsuleFd.FdName = self.__Token
+        CapsuleObj.CapsuleDataList.append(CapsuleFd)
+        return True
+
+    ## __GetAnyFileStatement() method
+    #
+    #   Get AnyFile for capsule
+    #
+    #   @param  self        The object pointer
+    #   @param  CapsuleObj  for whom AnyFile is got
+    #   @retval True        Successfully find a Anyfile statement
+    #   @retval False       Not able to find a AnyFile statement
+    #
+    def __GetAnyFileStatement(self, CapsuleObj):
+
+        if not self.__IsKeyword("FILE"):
+            return False
+
+        if not self.__IsKeyword("DATA"):
+            self.__UndoToken()
+            return False
+
+        if not self.__IsToken("="):
+            raise Warning("expected '='", self.FileName, self.CurrentLineNumber)
+
+        if not self.__GetNextToken():
+            raise Warning("expected File name", self.FileName, self.CurrentLineNumber)
+        
+        AnyFileName = self.__Token
+        AnyFileName = GenFdsGlobalVariable.ReplaceWorkspaceMacro(AnyFileName)
+        if not os.path.exists(AnyFileName):
+            raise Warning("File %s not exists"%AnyFileName, self.FileName, self.CurrentLineNumber)
+
+        CapsuleAnyFile = CapsuleData.CapsuleAnyFile()
+        CapsuleAnyFile.FileName = AnyFileName
+        CapsuleObj.CapsuleDataList.append(CapsuleAnyFile)
         return True
 
     ## __GetRule() method
@@ -3619,7 +3840,7 @@ class FdfParser:
         if not self.__GetNextToken():
             raise Warning("expected Component version", self.FileName, self.CurrentLineNumber)
 
-        Pattern = re.compile('-$|[0-9]{0,1}[0-9]{1}\.[0-9]{0,1}[0-9]{1}')
+        Pattern = re.compile('-$|[0-9a-fA-F]{1,2}\.[0-9a-fA-F]{1,2}$', re.DOTALL)
         if Pattern.match(self.__Token) == None:
             raise Warning("Unknown version format '%s'" % self.__Token, self.FileName, self.CurrentLineNumber)
         CompStatementObj.CompVer = self.__Token
@@ -3753,6 +3974,8 @@ class FdfParser:
 
         if not ffsInf.InfFileName in self.Profile.InfList:
             self.Profile.InfList.append(ffsInf.InfFileName)
+            FileLineTuple = GetRealFileLine(self.FileName, self.CurrentLineNumber)
+            self.Profile.InfFileLineList.append(FileLineTuple)
 
         
         self.__GetOptRomOverrides (ffsInf)
@@ -3804,7 +4027,7 @@ class FdfParser:
                     Overrides.PciRevision = self.__Token
                     continue
 
-                if self.__IsKeyword( "COMPRESS"):
+                if self.__IsKeyword( "PCI_COMPRESS"):
                     if not self.__IsToken( "="):
                         raise Warning("expected '='", self.FileName, self.CurrentLineNumber)
                     if not self.__GetNextToken():
@@ -3889,16 +4112,18 @@ class FdfParser:
     def __GetReferencedFdCapTuple(self, CapObj, RefFdList = [], RefFvList = []):
 
         for CapsuleDataObj in CapObj.CapsuleDataList :
-            if CapsuleDataObj.FvName != None and CapsuleDataObj.FvName.upper() not in RefFvList:
+            if hasattr(CapsuleDataObj, 'FvName') and CapsuleDataObj.FvName != None and CapsuleDataObj.FvName.upper() not in RefFvList:
                 RefFvList.append (CapsuleDataObj.FvName.upper())
+            elif hasattr(CapsuleDataObj, 'FdName') and CapsuleDataObj.FdName != None and CapsuleDataObj.FdName.upper() not in RefFdList:
+                RefFdList.append (CapsuleDataObj.FdName.upper())            
             elif CapsuleDataObj.Ffs != None:
-              if isinstance(CapsuleDataObj.Ffs, FfsFileStatement.FileStatement):
-                  if CapsuleDataObj.Ffs.FvName != None and CapsuleDataObj.Ffs.FvName.upper() not in RefFvList:
-                      RefFvList.append(CapsuleDataObj.Ffs.FvName.upper())
-                  elif CapsuleDataObj.Ffs.FdName != None and CapsuleDataObj.Ffs.FdName.upper() not in RefFdList:
-                      RefFdList.append(CapsuleDataObj.Ffs.FdName.upper())
-                  else:
-                      self.__GetReferencedFdFvTupleFromSection(CapsuleDataObj.Ffs, RefFdList, RefFvList)
+                if isinstance(CapsuleDataObj.Ffs, FfsFileStatement.FileStatement):
+                    if CapsuleDataObj.Ffs.FvName != None and CapsuleDataObj.Ffs.FvName.upper() not in RefFvList:
+                        RefFvList.append(CapsuleDataObj.Ffs.FvName.upper())
+                    elif CapsuleDataObj.Ffs.FdName != None and CapsuleDataObj.Ffs.FdName.upper() not in RefFdList:
+                        RefFdList.append(CapsuleDataObj.Ffs.FdName.upper())
+                    else:
+                        self.__GetReferencedFdFvTupleFromSection(CapsuleDataObj.Ffs, RefFdList, RefFvList)
 
     ## __GetFvInFd() method
     #
@@ -4098,12 +4323,19 @@ class FdfParser:
         return False
 
 if __name__ == "__main__":
-    parser = FdfParser("..\LakeportX64Pkg.fdf")
+    import sys
+    try:
+        test_file = sys.argv[1]
+    except IndexError, v:
+        print "Usage: %s filename" % sys.argv[0]
+        sys.exit(1)
+
+    parser = FdfParser(test_file)
     try:
         parser.ParseFile()
         parser.CycleReferenceCheck()
     except Warning, X:
-            print str(X)
+        print str(X)
     else:
         print "Success!"
 

@@ -15,6 +15,7 @@ import re
 from CommonDataClass.DataClass import *
 from Common.DataType import SUP_MODULE_LIST_STRING, TAB_VALUE_SPLIT
 from EccToolError import *
+from MetaDataParser import ParseHeaderCommentSection
 import EccGlobalData
 import c
 
@@ -48,7 +49,7 @@ class Check(object):
         if EccGlobalData.gConfig.GeneralCheckNonAcsii == '1' or EccGlobalData.gConfig.GeneralCheckAll == '1' or EccGlobalData.gConfig.CheckAll == '1':
             EdkLogger.quiet("Checking Non-ACSII char in file ...")
             SqlCommand = """select ID, FullPath, ExtName from File"""
-            RecordSet = EccGlobalData.gDb.TblInf.Exec(SqlCommand)
+            RecordSet = EccGlobalData.gDb.TblFile.Exec(SqlCommand)
             for Record in RecordSet:
                 if Record[2].upper() not in EccGlobalData.gConfig.BinaryExtList:
                     op = open(Record[1]).readlines()
@@ -59,8 +60,8 @@ class Check(object):
                         for Char in Line:
                             IndexOfChar += 1
                             if ord(Char) > 126:
-                                OtherMsg = "File %s has Non-ASCII char at line %s column %s" %(Record[1], IndexOfLine, IndexOfChar)
-                                EccGlobalData.gDb.TblReport.Insert(ERROR_GENERAL_CHECK_NON_ACSII, OtherMsg = OtherMsg, BelongsToTable = 'File', BelongsToItem = Record[0])
+                                OtherMsg = "File %s has Non-ASCII char at line %s column %s" % (Record[1], IndexOfLine, IndexOfChar)
+                                EccGlobalData.gDb.TblReport.Insert(ERROR_GENERAL_CHECK_NON_ACSII, OtherMsg=OtherMsg, BelongsToTable='File', BelongsToItem=Record[0])
 
     # C Function Layout Checking
     def FunctionLayoutCheck(self):
@@ -251,7 +252,7 @@ class Check(object):
             EdkLogger.quiet("Checking same struct ...")
             AllStructure = {}
             for IdentifierTable in EccGlobalData.gIdentifierTableList:
-                SqlCommand = """select ID, Name, BelongsToFile from %s where Model = %s""" %(IdentifierTable, MODEL_IDENTIFIER_STRUCTURE)
+                SqlCommand = """select ID, Name, BelongsToFile from %s where Model = %s""" % (IdentifierTable, MODEL_IDENTIFIER_STRUCTURE)
                 RecordSet = EccGlobalData.gDb.TblFile.Exec(SqlCommand)
                 for Record in RecordSet:
                     if Record[1] != '':
@@ -265,7 +266,7 @@ class Check(object):
                             if NewRecordSet != []:
                                 OtherMsg = "The structure name [%s] is duplicate with the one defined in %s, maybe struct NOT typedefed or the typedef new type NOT used to qualify variables" % (Record[1], NewRecordSet[0][0])
                             if not EccGlobalData.gException.IsException(ERROR_DECLARATION_DATA_TYPE_CHECK_SAME_STRUCTURE, Record[1]):
-                                EccGlobalData.gDb.TblReport.Insert(ERROR_DECLARATION_DATA_TYPE_CHECK_SAME_STRUCTURE, OtherMsg = OtherMsg, BelongsToTable = IdentifierTable, BelongsToItem = Record[0])
+                                EccGlobalData.gDb.TblReport.Insert(ERROR_DECLARATION_DATA_TYPE_CHECK_SAME_STRUCTURE, OtherMsg=OtherMsg, BelongsToTable=IdentifierTable, BelongsToItem=Record[0])
 
     # Check whether Union Type has a 'typedef' and the name is capital
     def DeclCheckUnionType(self):
@@ -365,7 +366,7 @@ class Check(object):
                         if Path.startswith('\\') or Path.startswith('/'):
                             Path = Path[1:]
                         if not EccGlobalData.gException.IsException(ERROR_INCLUDE_FILE_CHECK_NAME, Path):
-                            EccGlobalData.gDb.TblReport.Insert(ERROR_INCLUDE_FILE_CHECK_NAME, OtherMsg = "The file name for [%s] is duplicate" % Path, BelongsToTable = 'File', BelongsToItem = Item[0])
+                            EccGlobalData.gDb.TblReport.Insert(ERROR_INCLUDE_FILE_CHECK_NAME, OtherMsg="The file name for [%s] is duplicate" % Path, BelongsToTable='File', BelongsToItem=Item[0])
 
     # Check whether all include file contents is guarded by a #ifndef statement.
     def IncludeFileCheckIfndef(self):
@@ -415,13 +416,81 @@ class Check(object):
                     elif Ext in ('.inf', '.dec', '.dsc', '.fdf'):
                         FullName = os.path.join(Dirpath, F)
                         op = open(FullName).readlines()
-                        if not op[0].startswith('## @file') and op[6].startswith('## @file') and op[7].startswith('## @file'):
+                        FileLinesList = op
+                        LineNo             = 0
+                        CurrentSection     = MODEL_UNKNOWN 
+                        HeaderSectionLines       = []
+                        HeaderCommentStart = False 
+                        HeaderCommentEnd   = False
+                        
+                        for Line in FileLinesList:
+                            LineNo   = LineNo + 1
+                            Line     = Line.strip()
+                            if (LineNo < len(FileLinesList) - 1):
+                                NextLine = FileLinesList[LineNo].strip()
+            
+                            #
+                            # blank line
+                            #
+                            if (Line == '' or not Line) and LineNo == len(FileLinesList):
+                                LastSectionFalg = True
+
+                            #
+                            # check whether file header comment section started
+                            #
+                            if Line.startswith('#') and \
+                                (Line.find('@file') > -1) and \
+                                not HeaderCommentStart:
+                                if CurrentSection != MODEL_UNKNOWN:
+                                    SqlStatement = """ select ID from File where FullPath like '%s'""" % FullName
+                                    ResultSet = EccGlobalData.gDb.TblFile.Exec(SqlStatement)
+                                    for Result in ResultSet:
+                                        Msg = 'INF/DEC/DSC/FDF file header comment should begin with ""## @file"" or ""# @file""at the very top file'
+                                        EccGlobalData.gDb.TblReport.Insert(ERROR_DOXYGEN_CHECK_FILE_HEADER, Msg, "File", Result[0])
+
+                                else:
+                                    CurrentSection = MODEL_IDENTIFIER_FILE_HEADER
+                                    #
+                                    # Append the first line to section lines.
+                                    #
+                                    HeaderSectionLines.append((Line, LineNo))
+                                    HeaderCommentStart = True
+                                    continue        
+            
+                            #
+                            # Collect Header content.
+                            #
+                            if (Line.startswith('#') and CurrentSection == MODEL_IDENTIFIER_FILE_HEADER) and\
+                                HeaderCommentStart and not Line.startswith('##') and not\
+                                HeaderCommentEnd and NextLine != '':
+                                HeaderSectionLines.append((Line, LineNo))
+                                continue
+                            #
+                            # Header content end
+                            #
+                            if (Line.startswith('##') or not Line.strip().startswith("#")) and HeaderCommentStart \
+                                and not HeaderCommentEnd:
+                                if Line.startswith('##'):
+                                    HeaderCommentEnd = True
+                                HeaderSectionLines.append((Line, LineNo))
+                                ParseHeaderCommentSection(HeaderSectionLines, FullName)
+                                break
+                        if HeaderCommentStart == False:
                             SqlStatement = """ select ID from File where FullPath like '%s'""" % FullName
                             ResultSet = EccGlobalData.gDb.TblFile.Exec(SqlStatement)
                             for Result in ResultSet:
-                                Msg = 'INF/DEC/DSC/FDF file header comment should begin with ""## @file""'
+                                Msg = 'INF/DEC/DSC/FDF file header comment should begin with ""## @file"" or ""# @file"" at the very top file'
                                 EccGlobalData.gDb.TblReport.Insert(ERROR_DOXYGEN_CHECK_FILE_HEADER, Msg, "File", Result[0])
+                        if HeaderCommentEnd == False:
+                            SqlStatement = """ select ID from File where FullPath like '%s'""" % FullName
+                            ResultSet = EccGlobalData.gDb.TblFile.Exec(SqlStatement)
+                            for Result in ResultSet:
+                                Msg = 'INF/DEC/DSC/FDF file header comment should end with ""##"" at the end of file header comment block'
+                                # Check whether File header Comment End with '##'
+                                if EccGlobalData.gConfig.HeaderCheckFileCommentEnd == '1' or EccGlobalData.gConfig.HeaderCheckAll == '1' or EccGlobalData.gConfig.CheckAll == '1':
+                                    EccGlobalData.gDb.TblReport.Insert(ERROR_DOXYGEN_CHECK_FILE_HEADER, Msg, "File", Result[0])
 
+                                     
 
     # Check whether the function headers are followed Doxygen special documentation blocks in section 2.3.5
     def DoxygenCheckFunctionHeader(self):
@@ -504,9 +573,9 @@ class Check(object):
     def MetaDataFileCheckLibraryInstance(self):
         if EccGlobalData.gConfig.MetaDataFileCheckLibraryInstance == '1' or EccGlobalData.gConfig.MetaDataFileCheckAll == '1' or EccGlobalData.gConfig.CheckAll == '1':
             EdkLogger.quiet("Checking for library instance type issue ...")
-            SqlCommand = """select A.ID, A.Value2, B.Value2 from Inf as A left join Inf as B
-                            where A.Value1 = 'LIBRARY_CLASS' and A.Model = %s
-                            and B.Value1 = 'MODULE_TYPE' and B.Model = %s and A.BelongsToFile = B.BelongsToFile
+            SqlCommand = """select A.ID, A.Value3, B.Value3 from Inf as A left join Inf as B
+                            where A.Value2 = 'LIBRARY_CLASS' and A.Model = %s
+                            and B.Value2 = 'MODULE_TYPE' and B.Model = %s and A.BelongsToFile = B.BelongsToFile
                             group by A.BelongsToFile""" % (MODEL_META_DATA_HEADER, MODEL_META_DATA_HEADER)
             RecordSet = EccGlobalData.gDb.TblInf.Exec(SqlCommand)
             LibraryClasses = {}
@@ -526,10 +595,10 @@ class Check(object):
                             LibraryClasses[List[0]].append(Item)
 
                 if Record[2] != 'BASE' and Record[2] not in SupModType:
-                    EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_LIBRARY_INSTANCE_2, OtherMsg = "The Library Class '%s' does not specify its supported module types" % (List[0]), BelongsToTable = 'Inf', BelongsToItem = Record[0])
+                    EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_LIBRARY_INSTANCE_2, OtherMsg="The Library Class '%s' does not specify its supported module types" % (List[0]), BelongsToTable='Inf', BelongsToItem=Record[0])
 
-            SqlCommand = """select A.ID, A.Value1, B.Value2 from Inf as A left join Inf as B
-                            where A.Model = %s and B.Value1 = '%s' and B.Model = %s
+            SqlCommand = """select A.ID, A.Value1, B.Value3 from Inf as A left join Inf as B
+                            where A.Model = %s and B.Value2 = '%s' and B.Model = %s
                             and B.BelongsToFile = A.BelongsToFile""" \
                             % (MODEL_EFI_LIBRARY_CLASS, 'MODULE_TYPE', MODEL_META_DATA_HEADER)
             RecordSet = EccGlobalData.gDb.TblInf.Exec(SqlCommand)
@@ -546,10 +615,10 @@ class Check(object):
                 if Record[1] in LibraryClasses:
                     if Record[2] not in LibraryClasses[Record[1]] and 'BASE' not in RecordDict[Record[1]]:
                         if not EccGlobalData.gException.IsException(ERROR_META_DATA_FILE_CHECK_LIBRARY_INSTANCE_1, Record[1]):
-                            EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_LIBRARY_INSTANCE_1, OtherMsg = "The type of Library Class [%s] defined in Inf file does not match the type of the module" % (Record[1]), BelongsToTable = 'Inf', BelongsToItem = Record[0])
+                            EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_LIBRARY_INSTANCE_1, OtherMsg="The type of Library Class [%s] defined in Inf file does not match the type of the module" % (Record[1]), BelongsToTable='Inf', BelongsToItem=Record[0])
                 else:
                     if not EccGlobalData.gException.IsException(ERROR_META_DATA_FILE_CHECK_LIBRARY_INSTANCE_1, Record[1]):
-                        EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_LIBRARY_INSTANCE_1, OtherMsg = "The type of Library Class [%s] defined in Inf file does not match the type of the module" % (Record[1]), BelongsToTable = 'Inf', BelongsToItem = Record[0])
+                        EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_LIBRARY_INSTANCE_1, OtherMsg="The type of Library Class [%s] defined in Inf file does not match the type of the module" % (Record[1]), BelongsToTable='Inf', BelongsToItem=Record[0])
 
     # Check whether a Library Instance has been defined for all dependent library classes
     def MetaDataFileCheckLibraryInstanceDependent(self):
@@ -558,11 +627,13 @@ class Check(object):
             SqlCommand = """select ID, Value1, Value2 from Dsc where Model = %s""" % MODEL_EFI_LIBRARY_CLASS
             LibraryClasses = EccGlobalData.gDb.TblDsc.Exec(SqlCommand)
             for LibraryClass in LibraryClasses:
-                if LibraryClass[1].upper() != 'NULL':
+                if LibraryClass[1].upper() == 'NULL' or LibraryClass[1].startswith('!ifdef') or LibraryClass[1].startswith('!ifndef') or LibraryClass[1].endswith('!endif'):
+                    continue
+                else:
                     LibraryIns = os.path.normpath(os.path.join(EccGlobalData.gWorkspace, LibraryClass[2]))
-                    SqlCommand = """select Value2 from Inf where BelongsToFile =
+                    SqlCommand = """select Value3 from Inf where BelongsToFile =
                                     (select ID from File where lower(FullPath) = lower('%s'))
-                                    and Value1 = '%s'""" % (LibraryIns, 'LIBRARY_CLASS')
+                                    and Value2 = '%s'""" % (LibraryIns, 'LIBRARY_CLASS')
                     RecordSet = EccGlobalData.gDb.TblInf.Exec(SqlCommand)
                     IsFound = False
                     for Record in RecordSet:
@@ -571,7 +642,7 @@ class Check(object):
                             IsFound = True
                     if not IsFound:
                         if not EccGlobalData.gException.IsException(ERROR_META_DATA_FILE_CHECK_LIBRARY_INSTANCE_DEPENDENT, LibraryClass[1]):
-                            EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_LIBRARY_INSTANCE_DEPENDENT, OtherMsg = "The Library Class [%s] is not specified in '%s'" % (LibraryClass[1], LibraryClass[2]), BelongsToTable = 'Dsc', BelongsToItem = LibraryClass[0])
+                            EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_LIBRARY_INSTANCE_DEPENDENT, OtherMsg="The Library Class [%s] is not specified in '%s'" % (LibraryClass[1], LibraryClass[2]), BelongsToTable='Dsc', BelongsToItem=LibraryClass[0])
 
     # Check whether the Library Instances specified by the LibraryClasses sections are listed in order of dependencies
     def MetaDataFileCheckLibraryInstanceOrder(self):
@@ -580,6 +651,7 @@ class Check(object):
             pass
 
     # Check whether the unnecessary inclusion of library classes in the Inf file
+    # Check whether the unnecessary duplication of library classe names in the DSC file
     def MetaDataFileCheckLibraryNoUse(self):
         if EccGlobalData.gConfig.MetaDataFileCheckLibraryNoUse == '1' or EccGlobalData.gConfig.MetaDataFileCheckAll == '1' or EccGlobalData.gConfig.CheckAll == '1':
             EdkLogger.quiet("Checking for library instance not used ...")
@@ -587,8 +659,21 @@ class Check(object):
             RecordSet = EccGlobalData.gDb.TblInf.Exec(SqlCommand)
             for Record in RecordSet:
                 if not EccGlobalData.gException.IsException(ERROR_META_DATA_FILE_CHECK_LIBRARY_NO_USE, Record[1]):
-                    EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_LIBRARY_NO_USE, OtherMsg = "The Library Class [%s] is not used in any platform" % (Record[1]), BelongsToTable = 'Inf', BelongsToItem = Record[0])
-
+                    EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_LIBRARY_NO_USE, OtherMsg="The Library Class [%s] is not used in any platform" % (Record[1]), BelongsToTable='Inf', BelongsToItem=Record[0])
+            SqlCommand = """
+                         select A.ID, A.Value1, A.BelongsToFile, A.StartLine, B.StartLine from Dsc as A left join Dsc as B
+                         where A.Model = %s and B.Model = %s and A.Scope1 = B.Scope1 and A.Scope2 = B.Scope2 and A.ID <> B.ID
+                         and A.Value1 = B.Value1 and A.Value2 <> B.Value2 and A.BelongsToItem = -1 and B.BelongsToItem = -1 and A.StartLine <> B.StartLine and B.BelongsToFile = A.BelongsToFile""" \
+                            % (MODEL_EFI_LIBRARY_CLASS, MODEL_EFI_LIBRARY_CLASS)
+            RecordSet = EccGlobalData.gDb.TblDsc.Exec(SqlCommand)
+            for Record in RecordSet:
+                if Record[3] and Record[4] and Record[3] != Record[4]:
+                    SqlCommand = """select FullPath from File where ID = %s""" % (Record[2])
+                    FilePathList = EccGlobalData.gDb.TblFile.Exec(SqlCommand)
+                    for FilePath in FilePathList:
+                        if not EccGlobalData.gException.IsException(ERROR_META_DATA_FILE_CHECK_LIBRARY_NAME_DUPLICATE, Record[1]):
+                            EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_LIBRARY_NAME_DUPLICATE, OtherMsg="The Library Class [%s] is duplicated in '%s' line %s and line %s." % (Record[1], FilePath, Record[3], Record[4]), BelongsToTable='Dsc', BelongsToItem=Record[0])
+                                                
     # Check whether an Inf file is specified in the FDF file, but not in the Dsc file, then the Inf file must be for a Binary module only
     def MetaDataFileCheckBinaryInfInFdf(self):
         if EccGlobalData.gConfig.MetaDataFileCheckBinaryInfInFdf == '1' or EccGlobalData.gConfig.MetaDataFileCheckAll == '1' or EccGlobalData.gConfig.CheckAll == '1':
@@ -608,90 +693,94 @@ class Check(object):
                 SqlCommand = """select ID from Inf where Model = %s and BelongsToFile = (select ID from File where FullPath like '%s')
                                 """ % (MODEL_EFI_SOURCE_FILE, FilePath)
                 NewRecordSet = EccGlobalData.gDb.TblFile.Exec(SqlCommand)
-                if NewRecordSet!= []:
+                if NewRecordSet != []:
                     if not EccGlobalData.gException.IsException(ERROR_META_DATA_FILE_CHECK_BINARY_INF_IN_FDF, FilePath):
-                        EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_BINARY_INF_IN_FDF, OtherMsg = "File [%s] defined in FDF file and not in DSC file must be a binary module" % (FilePath), BelongsToTable = 'Fdf', BelongsToItem = FdfID)
+                        EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_BINARY_INF_IN_FDF, OtherMsg="File [%s] defined in FDF file and not in DSC file must be a binary module" % (FilePath), BelongsToTable='Fdf', BelongsToItem=FdfID)
 
     # Check whether a PCD is set in a Dsc file or the FDF file, but not in both.
     def MetaDataFileCheckPcdDuplicate(self):
         if EccGlobalData.gConfig.MetaDataFileCheckPcdDuplicate == '1' or EccGlobalData.gConfig.MetaDataFileCheckAll == '1' or EccGlobalData.gConfig.CheckAll == '1':
             EdkLogger.quiet("Checking for duplicate PCDs defined in both DSC and FDF files ...")
             SqlCommand = """
-                         select A.ID, A.Value2, A.BelongsToFile, B.ID, B.Value2, B.BelongsToFile from Dsc as A, Fdf as B
+                         select A.ID, A.Value1, A.Value2, A.BelongsToFile, B.ID, B.Value1, B.Value2, B.BelongsToFile from Dsc as A, Fdf as B
                          where A.Model >= %s and A.Model < %s
                          and B.Model >= %s and B.Model < %s
+                         and A.Value1 = B.Value1
                          and A.Value2 = B.Value2
                          and A.Enabled > -1
                          and B.Enabled > -1
                          group by A.ID
-                         """% (MODEL_PCD, MODEL_META_DATA_HEADER, MODEL_PCD, MODEL_META_DATA_HEADER)
+                         """ % (MODEL_PCD, MODEL_META_DATA_HEADER, MODEL_PCD, MODEL_META_DATA_HEADER)
             RecordSet = EccGlobalData.gDb.TblDsc.Exec(SqlCommand)
             for Record in RecordSet:
-                SqlCommand1 = """select Name from File where ID = %s""" %Record[2]
-                SqlCommand2 = """select Name from File where ID = %s""" %Record[5]
+                SqlCommand1 = """select Name from File where ID = %s""" % Record[3]
+                SqlCommand2 = """select Name from File where ID = %s""" % Record[7]
                 DscFileName = os.path.splitext(EccGlobalData.gDb.TblDsc.Exec(SqlCommand1)[0][0])[0]
                 FdfFileName = os.path.splitext(EccGlobalData.gDb.TblDsc.Exec(SqlCommand2)[0][0])[0]
                 if DscFileName != FdfFileName:
                     continue
-                if not EccGlobalData.gException.IsException(ERROR_META_DATA_FILE_CHECK_PCD_DUPLICATE, Record[1]):
-                    EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_PCD_DUPLICATE, OtherMsg = "The PCD [%s] is defined in both FDF file and DSC file" % (Record[1]), BelongsToTable = 'Dsc', BelongsToItem = Record[0])
-                if not EccGlobalData.gException.IsException(ERROR_META_DATA_FILE_CHECK_PCD_DUPLICATE, Record[3]):
-                    EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_PCD_DUPLICATE, OtherMsg = "The PCD [%s] is defined in both FDF file and DSC file" % (Record[4]), BelongsToTable = 'Fdf', BelongsToItem = Record[3])
+                if not EccGlobalData.gException.IsException(ERROR_META_DATA_FILE_CHECK_PCD_DUPLICATE, Record[1] + '.' + Record[2]):
+                    EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_PCD_DUPLICATE, OtherMsg="The PCD [%s] is defined in both FDF file and DSC file" % (Record[1] + '.' + Record[2]), BelongsToTable='Dsc', BelongsToItem=Record[0])
+                if not EccGlobalData.gException.IsException(ERROR_META_DATA_FILE_CHECK_PCD_DUPLICATE, Record[5] + '.' + Record[6]):
+                    EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_PCD_DUPLICATE, OtherMsg="The PCD [%s] is defined in both FDF file and DSC file" % (Record[5] + '.' + Record[6]), BelongsToTable='Fdf', BelongsToItem=Record[4])
 
             EdkLogger.quiet("Checking for duplicate PCDs defined in DEC files ...")
             SqlCommand = """
-                         select A.ID, A.Value2 from Dec as A, Dec as B
+                         select A.ID, A.Value1, A.Value2, A.Model, B.Model from Dec as A left join Dec as B
                          where A.Model >= %s and A.Model < %s
                          and B.Model >= %s and B.Model < %s
+                         and A.Value1 = B.Value1
                          and A.Value2 = B.Value2
-                         and ((A.Arch = B.Arch) and (A.Arch != 'COMMON' or B.Arch != 'COMMON'))
-                         and A.ID != B.ID
+                         and A.Scope1 = B.Scope1
+                         and A.ID <> B.ID
+                         and A.Model = B.Model
                          and A.Enabled > -1
                          and B.Enabled > -1
                          and A.BelongsToFile = B.BelongsToFile
                          group by A.ID
-                         """% (MODEL_PCD, MODEL_META_DATA_HEADER, MODEL_PCD, MODEL_META_DATA_HEADER)
-            RecordSet = EccGlobalData.gDb.TblDsc.Exec(SqlCommand)
+                         """ % (MODEL_PCD, MODEL_META_DATA_HEADER, MODEL_PCD, MODEL_META_DATA_HEADER)
+            RecordSet = EccGlobalData.gDb.TblDec.Exec(SqlCommand)
             for Record in RecordSet:
-                if not EccGlobalData.gException.IsException(ERROR_META_DATA_FILE_CHECK_PCD_DUPLICATE, Record[1]):
-                    EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_PCD_DUPLICATE, OtherMsg = "The PCD [%s] is defined duplicated in DEC file" % (Record[1]), BelongsToTable = 'Dec', BelongsToItem = Record[0])
+                RecordCat = Record[1] + '.' + Record[2]
+                if not EccGlobalData.gException.IsException(ERROR_META_DATA_FILE_CHECK_PCD_DUPLICATE, RecordCat):
+                    EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_PCD_DUPLICATE, OtherMsg="The PCD [%s] is defined duplicated in DEC file" % RecordCat, BelongsToTable='Dec', BelongsToItem=Record[0])
 
     # Check whether PCD settings in the FDF file can only be related to flash.
     def MetaDataFileCheckPcdFlash(self):
         if EccGlobalData.gConfig.MetaDataFileCheckPcdFlash == '1' or EccGlobalData.gConfig.MetaDataFileCheckAll == '1' or EccGlobalData.gConfig.CheckAll == '1':
             EdkLogger.quiet("Checking only Flash related PCDs are used in FDF ...")
             SqlCommand = """
-                         select ID, Value2, BelongsToFile from Fdf as A
+                         select ID, Value1, Value2, BelongsToFile from Fdf as A
                          where A.Model >= %s and Model < %s
                          and A.Enabled > -1
                          and A.Value2 not like '%%Flash%%'
-                         """% (MODEL_PCD, MODEL_META_DATA_HEADER)
+                         """ % (MODEL_PCD, MODEL_META_DATA_HEADER)
             RecordSet = EccGlobalData.gDb.TblFdf.Exec(SqlCommand)
             for Record in RecordSet:
-                if not EccGlobalData.gException.IsException(ERROR_META_DATA_FILE_CHECK_PCD_FLASH, Record[1]):
-                    EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_PCD_FLASH, OtherMsg = "The PCD [%s] defined in FDF file is not related to Flash" % (Record[1]), BelongsToTable = 'Fdf', BelongsToItem = Record[0])
+                if not EccGlobalData.gException.IsException(ERROR_META_DATA_FILE_CHECK_PCD_FLASH, Record[1] + '.' + Record[2]):
+                    EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_PCD_FLASH, OtherMsg="The PCD [%s] defined in FDF file is not related to Flash" % (Record[1] + '.' + Record[2]), BelongsToTable='Fdf', BelongsToItem=Record[0])
 
     # Check whether PCDs used in Inf files but not specified in Dsc or FDF files
     def MetaDataFileCheckPcdNoUse(self):
         if EccGlobalData.gConfig.MetaDataFileCheckPcdNoUse == '1' or EccGlobalData.gConfig.MetaDataFileCheckAll == '1' or EccGlobalData.gConfig.CheckAll == '1':
             EdkLogger.quiet("Checking for non-specified PCDs ...")
             SqlCommand = """
-                         select ID, Value2, BelongsToFile from Inf as A
+                         select ID, Value1, Value2, BelongsToFile from Inf as A
                          where A.Model >= %s and Model < %s
                          and A.Enabled > -1
-                         and A.Value2 not in
-                             (select Value2 from Dsc as B
+                         and (A.Value1, A.Value2) not in
+                             (select Value1, Value2 from Dsc as B
                               where B.Model >= %s and B.Model < %s
                               and B.Enabled > -1)
-                         and A.Value2 not in
-                             (select Value2 from Fdf as C
+                         and (A.Value1, A.Value2) not in
+                             (select Value1, Value2 from Fdf as C
                               where C.Model >= %s and C.Model < %s
                               and C.Enabled > -1)
-                         """% (MODEL_PCD, MODEL_META_DATA_HEADER, MODEL_PCD, MODEL_META_DATA_HEADER, MODEL_PCD, MODEL_META_DATA_HEADER)
+                         """ % (MODEL_PCD, MODEL_META_DATA_HEADER, MODEL_PCD, MODEL_META_DATA_HEADER, MODEL_PCD, MODEL_META_DATA_HEADER)
             RecordSet = EccGlobalData.gDb.TblInf.Exec(SqlCommand)
             for Record in RecordSet:
-                if not EccGlobalData.gException.IsException(ERROR_META_DATA_FILE_CHECK_PCD_NO_USE, Record[1]):
-                    EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_PCD_NO_USE, OtherMsg = "The PCD [%s] defined in INF file is not specified in either DSC or FDF files" % (Record[1]), BelongsToTable = 'Inf', BelongsToItem = Record[0])
+                if not EccGlobalData.gException.IsException(ERROR_META_DATA_FILE_CHECK_PCD_NO_USE, Record[1] + '.' + Record[2]):
+                    EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_PCD_NO_USE, OtherMsg="The PCD [%s] defined in INF file is not specified in either DSC or FDF files" % (Record[1] + '.' + Record[2]), BelongsToTable='Inf', BelongsToItem=Record[0])
 
     # Check whether having duplicate guids defined for Guid/Protocol/Ppi
     def MetaDataFileCheckGuidDuplicate(self):
@@ -715,7 +804,7 @@ class Check(object):
         if EccGlobalData.gConfig.MetaDataFileCheckModuleFileNoUse == '1' or EccGlobalData.gConfig.MetaDataFileCheckAll == '1' or EccGlobalData.gConfig.CheckAll == '1':
             EdkLogger.quiet("Checking for no used module files ...")
             SqlCommand = """
-                         select upper(Path) from File where ID in (select BelongsToFile from INF where BelongsToFile != -1)
+                         select upper(Path) from File where ID in (select BelongsToFile from Inf where BelongsToFile != -1)
                          """
             InfPathSet = EccGlobalData.gDb.TblInf.Exec(SqlCommand)
             InfPathList = []
@@ -735,27 +824,27 @@ class Check(object):
                 Path = Path.upper().replace('\X64', '').replace('\IA32', '').replace('\EBC', '').replace('\IPF', '').replace('\ARM', '')
                 if Path in InfPathList:
                     if not EccGlobalData.gException.IsException(ERROR_META_DATA_FILE_CHECK_MODULE_FILE_NO_USE, Record[2]):
-                        EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_MODULE_FILE_NO_USE, OtherMsg = "The source file [%s] is existing in module directory but it is not described in INF file." % (Record[2]), BelongsToTable = 'File', BelongsToItem = Record[0])
+                        EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_MODULE_FILE_NO_USE, OtherMsg="The source file [%s] is existing in module directory but it is not described in INF file." % (Record[2]), BelongsToTable='File', BelongsToItem=Record[0])
 
     # Check whether the PCD is correctly used in C function via its type
     def MetaDataFileCheckPcdType(self):
         if EccGlobalData.gConfig.MetaDataFileCheckPcdType == '1' or EccGlobalData.gConfig.MetaDataFileCheckAll == '1' or EccGlobalData.gConfig.CheckAll == '1':
             EdkLogger.quiet("Checking for pcd type in c code function usage ...")
             SqlCommand = """
-                         select ID, Model, Value1, BelongsToFile from INF where Model > %s and Model < %s
+                         select ID, Model, Value1, Value2, BelongsToFile from INF where Model > %s and Model < %s
                          """ % (MODEL_PCD, MODEL_META_DATA_HEADER)
             PcdSet = EccGlobalData.gDb.TblInf.Exec(SqlCommand)
             for Pcd in PcdSet:
                 Model = Pcd[1]
                 PcdName = Pcd[2]
-                if len(Pcd[2].split(".")) > 1:
-                    PcdName = Pcd[2].split(".")[1]
-                BelongsToFile = Pcd[3]
+                if Pcd[3]:
+                    PcdName = Pcd[3]
+                BelongsToFile = Pcd[4]
                 SqlCommand = """
                              select ID from File where FullPath in
                             (select B.Path || '\\' || A.Value1 from INF as A, File as B where A.Model = %s and A.BelongsToFile = %s
                              and B.ID = %s and (B.Model = %s or B.Model = %s))
-                             """ %(MODEL_EFI_SOURCE_FILE, BelongsToFile, BelongsToFile, MODEL_FILE_C, MODEL_FILE_H)
+                             """ % (MODEL_EFI_SOURCE_FILE, BelongsToFile, BelongsToFile, MODEL_FILE_C, MODEL_FILE_H)
                 TableSet = EccGlobalData.gDb.TblFile.Exec(SqlCommand)
                 for Tbl in TableSet:
                     TblName = 'Identifier' + str(Tbl[0])
@@ -768,11 +857,11 @@ class Check(object):
                         FunName = Record[0]
                         if not EccGlobalData.gException.IsException(ERROR_META_DATA_FILE_CHECK_PCD_TYPE, FunName):
                             if Model in [MODEL_PCD_FIXED_AT_BUILD] and not FunName.startswith('FixedPcdGet'):
-                                EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_PCD_TYPE, OtherMsg = "The pcd '%s' is defined as a FixPcd but now it is called by c function [%s]" % (PcdName, FunName), BelongsToTable = TblName, BelongsToItem = Record[1])
+                                EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_PCD_TYPE, OtherMsg="The pcd '%s' is defined as a FixPcd but now it is called by c function [%s]" % (PcdName, FunName), BelongsToTable=TblName, BelongsToItem=Record[1])
                             if Model in [MODEL_PCD_FEATURE_FLAG] and (not FunName.startswith('FeaturePcdGet') and not FunName.startswith('FeaturePcdSet')):
-                                EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_PCD_TYPE, OtherMsg = "The pcd '%s' is defined as a FeaturePcd but now it is called by c function [%s]" % (PcdName, FunName), BelongsToTable = TblName, BelongsToItem = Record[1])
+                                EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_PCD_TYPE, OtherMsg="The pcd '%s' is defined as a FeaturePcd but now it is called by c function [%s]" % (PcdName, FunName), BelongsToTable=TblName, BelongsToItem=Record[1])
                             if Model in [MODEL_PCD_PATCHABLE_IN_MODULE] and (not FunName.startswith('PatchablePcdGet') and not FunName.startswith('PatchablePcdSet')):
-                                EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_PCD_TYPE, OtherMsg = "The pcd '%s' is defined as a PatchablePcd but now it is called by c function [%s]" % (PcdName, FunName), BelongsToTable = TblName, BelongsToItem = Record[1])
+                                EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_PCD_TYPE, OtherMsg="The pcd '%s' is defined as a PatchablePcd but now it is called by c function [%s]" % (PcdName, FunName), BelongsToTable=TblName, BelongsToItem=Record[1])
 
             #ERROR_META_DATA_FILE_CHECK_PCD_TYPE
         pass
@@ -795,9 +884,9 @@ class Check(object):
             EdkLogger.quiet("Checking for pcd type in c code function usage ...")
             Table = EccGlobalData.gDb.TblInf
             SqlCommand = """
-                         select A.ID, A.Value2, A.BelongsToFile, B.BelongsToFile from %s as A, %s as B
-                         where A.Value1 = 'FILE_GUID' and B.Value1 = 'FILE_GUID' and
-                         A.Value2 = B.Value2 and A.ID <> B.ID group by A.ID
+                         select A.ID, A.Value3, A.BelongsToFile, B.BelongsToFile from %s as A, %s as B
+                         where A.Value2 = 'FILE_GUID' and B.Value2 = 'FILE_GUID' and
+                         A.Value3 = B.Value3 and A.ID <> B.ID group by A.ID
                          """ % (Table.Table, Table.Table)
             RecordSet = Table.Exec(SqlCommand)
             for Record in RecordSet:
@@ -806,7 +895,7 @@ class Check(object):
                 if InfPath1 and InfPath2:
                     if not EccGlobalData.gException.IsException(ERROR_META_DATA_FILE_CHECK_MODULE_FILE_GUID_DUPLICATION, InfPath1):
                         Msg = "The FILE_GUID of INF file [%s] is duplicated with that of %s" % (InfPath1, InfPath2)
-                        EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_MODULE_FILE_GUID_DUPLICATION, OtherMsg = Msg, BelongsToTable = Table.Table, BelongsToItem = Record[0])
+                        EccGlobalData.gDb.TblReport.Insert(ERROR_META_DATA_FILE_CHECK_MODULE_FILE_GUID_DUPLICATION, OtherMsg=Msg, BelongsToTable=Table.Table, BelongsToItem=Record[0])
 
 
     # Check whether these is duplicate Guid/Ppi/Protocol name
@@ -822,6 +911,7 @@ class Check(object):
                      select A.ID, A.Value1 from %s as A, %s as B
                      where A.Model = %s and B.Model = %s
                      and A.Value1 = B.Value1 and A.ID <> B.ID
+                     and A.Scope1 = B.Scope1
                      and A.Enabled > -1
                      and B.Enabled > -1
                      group by A.ID
@@ -829,7 +919,7 @@ class Check(object):
         RecordSet = Table.Exec(SqlCommand)
         for Record in RecordSet:
             if not EccGlobalData.gException.IsException(ErrorID, Record[1]):
-                EccGlobalData.gDb.TblReport.Insert(ErrorID, OtherMsg = "The %s name [%s] is defined more than one time" % (Name.upper(), Record[1]), BelongsToTable = Table.Table, BelongsToItem = Record[0])
+                EccGlobalData.gDb.TblReport.Insert(ErrorID, OtherMsg="The %s name [%s] is defined more than one time" % (Name.upper(), Record[1]), BelongsToTable=Table.Table, BelongsToItem=Record[0])
 
     # Check whether these is duplicate Guid/Ppi/Protocol value
     def CheckGuidProtocolPpiValue(self, ErrorID, Model):
@@ -842,15 +932,16 @@ class Check(object):
         if Model == MODEL_EFI_PPI:
             Name = 'ppi'
         SqlCommand = """
-                     select A.ID, A.Value2 from %s as A, %s as B
+                     select A.ID, A.Value1, A.Value2 from %s as A, %s as B
                      where A.Model = %s and B.Model = %s
                      and A.Value2 = B.Value2 and A.ID <> B.ID
+                     and A.Scope1 = B.Scope1 and A.Value1 <> B.Value1
                      group by A.ID
                      """ % (Table.Table, Table.Table, Model, Model)
         RecordSet = Table.Exec(SqlCommand)
-        for Record in RecordSet:
-            if not EccGlobalData.gException.IsException(ErrorID, Record[1]):
-                EccGlobalData.gDb.TblReport.Insert(ErrorID, OtherMsg = "The %s value [%s] is used more than one time" % (Name.upper(), Record[1]), BelongsToTable = Table.Table, BelongsToItem = Record[0])
+        for Record in RecordSet:     
+            if not EccGlobalData.gException.IsException(ErrorID, Record[1] + ':' + Record[2]):
+                EccGlobalData.gDb.TblReport.Insert(ErrorID, OtherMsg="The %s value [%s] is used more than one time" % (Name.upper(), Record[2]), BelongsToTable=Table.Table, BelongsToItem=Record[0])
 
     # Naming Convention Check
     def NamingConventionCheck(self):
@@ -883,7 +974,7 @@ class Check(object):
         if EccGlobalData.gConfig.NamingConventionCheckDefineStatement == '1' or EccGlobalData.gConfig.NamingConventionCheckAll == '1' or EccGlobalData.gConfig.CheckAll == '1':
             EdkLogger.quiet("Checking naming covention of #define statement ...")
 
-            SqlCommand = """select ID, Value from %s where Model = %s""" %(FileTable, MODEL_IDENTIFIER_MACRO_DEFINE)
+            SqlCommand = """select ID, Value from %s where Model = %s""" % (FileTable, MODEL_IDENTIFIER_MACRO_DEFINE)
             RecordSet = EccGlobalData.gDb.TblFile.Exec(SqlCommand)
             for Record in RecordSet:
                 Name = Record[1].strip().split()[1]
@@ -891,14 +982,14 @@ class Check(object):
                     Name = Name[0:Name.find('(')]
                 if Name.upper() != Name:
                     if not EccGlobalData.gException.IsException(ERROR_NAMING_CONVENTION_CHECK_DEFINE_STATEMENT, Name):
-                        EccGlobalData.gDb.TblReport.Insert(ERROR_NAMING_CONVENTION_CHECK_DEFINE_STATEMENT, OtherMsg = "The #define name [%s] does not follow the rules" % (Name), BelongsToTable = FileTable, BelongsToItem = Record[0])
+                        EccGlobalData.gDb.TblReport.Insert(ERROR_NAMING_CONVENTION_CHECK_DEFINE_STATEMENT, OtherMsg="The #define name [%s] does not follow the rules" % (Name), BelongsToTable=FileTable, BelongsToItem=Record[0])
 
     # Check whether only capital letters are used for typedef declarations
     def NamingConventionCheckTypedefStatement(self, FileTable):
         if EccGlobalData.gConfig.NamingConventionCheckTypedefStatement == '1' or EccGlobalData.gConfig.NamingConventionCheckAll == '1' or EccGlobalData.gConfig.CheckAll == '1':
             EdkLogger.quiet("Checking naming covention of #typedef statement ...")
 
-            SqlCommand = """select ID, Name from %s where Model = %s""" %(FileTable, MODEL_IDENTIFIER_TYPEDEF)
+            SqlCommand = """select ID, Name from %s where Model = %s""" % (FileTable, MODEL_IDENTIFIER_TYPEDEF)
             RecordSet = EccGlobalData.gDb.TblFile.Exec(SqlCommand)
             for Record in RecordSet:
                 Name = Record[1].strip()
@@ -911,20 +1002,20 @@ class Check(object):
                     Name = Name.replace('*', '').strip()
                     if Name.upper() != Name:
                         if not EccGlobalData.gException.IsException(ERROR_NAMING_CONVENTION_CHECK_TYPEDEF_STATEMENT, Name):
-                            EccGlobalData.gDb.TblReport.Insert(ERROR_NAMING_CONVENTION_CHECK_TYPEDEF_STATEMENT, OtherMsg = "The #typedef name [%s] does not follow the rules" % (Name), BelongsToTable = FileTable, BelongsToItem = Record[0])
+                            EccGlobalData.gDb.TblReport.Insert(ERROR_NAMING_CONVENTION_CHECK_TYPEDEF_STATEMENT, OtherMsg="The #typedef name [%s] does not follow the rules" % (Name), BelongsToTable=FileTable, BelongsToItem=Record[0])
 
     # Check whether the #ifndef at the start of an include file uses both prefix and postfix underscore characters, '_'.
     def NamingConventionCheckIfndefStatement(self, FileTable):
         if EccGlobalData.gConfig.NamingConventionCheckTypedefStatement == '1' or EccGlobalData.gConfig.NamingConventionCheckAll == '1' or EccGlobalData.gConfig.CheckAll == '1':
             EdkLogger.quiet("Checking naming covention of #ifndef statement ...")
 
-            SqlCommand = """select ID, Value from %s where Model = %s""" %(FileTable, MODEL_IDENTIFIER_MACRO_IFNDEF)
+            SqlCommand = """select ID, Value from %s where Model = %s""" % (FileTable, MODEL_IDENTIFIER_MACRO_IFNDEF)
             RecordSet = EccGlobalData.gDb.TblFile.Exec(SqlCommand)
             for Record in RecordSet:
                 Name = Record[1].replace('#ifndef', '').strip()
                 if Name[0] != '_' or Name[-1] != '_':
                     if not EccGlobalData.gException.IsException(ERROR_NAMING_CONVENTION_CHECK_IFNDEF_STATEMENT, Name):
-                        EccGlobalData.gDb.TblReport.Insert(ERROR_NAMING_CONVENTION_CHECK_IFNDEF_STATEMENT, OtherMsg = "The #ifndef name [%s] does not follow the rules" % (Name), BelongsToTable = FileTable, BelongsToItem = Record[0])
+                        EccGlobalData.gDb.TblReport.Insert(ERROR_NAMING_CONVENTION_CHECK_IFNDEF_STATEMENT, OtherMsg="The #ifndef name [%s] does not follow the rules" % (Name), BelongsToTable=FileTable, BelongsToItem=Record[0])
 
     # Rule for path name, variable name and function name
     # 1. First character should be upper case
@@ -940,7 +1031,7 @@ class Check(object):
             for Record in RecordSet:
                 if not Pattern.match(Record[1]):
                     if not EccGlobalData.gException.IsException(ERROR_NAMING_CONVENTION_CHECK_PATH_NAME, Record[1]):
-                        EccGlobalData.gDb.TblReport.Insert(ERROR_NAMING_CONVENTION_CHECK_PATH_NAME, OtherMsg = "The file path [%s] does not follow the rules" % (Record[1]), BelongsToTable = 'File', BelongsToItem = Record[0])
+                        EccGlobalData.gDb.TblReport.Insert(ERROR_NAMING_CONVENTION_CHECK_PATH_NAME, OtherMsg="The file path [%s] does not follow the rules" % (Record[1]), BelongsToTable='File', BelongsToItem=Record[0])
 
     # Rule for path name, variable name and function name
     # 1. First character should be upper case
@@ -953,12 +1044,12 @@ class Check(object):
             EdkLogger.quiet("Checking naming covention of variable name ...")
             Pattern = re.compile(r'^[A-Zgm]+\S*[a-z]\S*$')
 
-            SqlCommand = """select ID, Name from %s where Model = %s""" %(FileTable, MODEL_IDENTIFIER_VARIABLE)
+            SqlCommand = """select ID, Name from %s where Model = %s""" % (FileTable, MODEL_IDENTIFIER_VARIABLE)
             RecordSet = EccGlobalData.gDb.TblFile.Exec(SqlCommand)
             for Record in RecordSet:
                 if not Pattern.match(Record[1]):
                     if not EccGlobalData.gException.IsException(ERROR_NAMING_CONVENTION_CHECK_VARIABLE_NAME, Record[1]):
-                        EccGlobalData.gDb.TblReport.Insert(ERROR_NAMING_CONVENTION_CHECK_VARIABLE_NAME, OtherMsg = "The variable name [%s] does not follow the rules" % (Record[1]), BelongsToTable = FileTable, BelongsToItem = Record[0])
+                        EccGlobalData.gDb.TblReport.Insert(ERROR_NAMING_CONVENTION_CHECK_VARIABLE_NAME, OtherMsg="The variable name [%s] does not follow the rules" % (Record[1]), BelongsToTable=FileTable, BelongsToItem=Record[0])
 
     # Rule for path name, variable name and function name
     # 1. First character should be upper case
@@ -974,20 +1065,20 @@ class Check(object):
             for Record in RecordSet:
                 if not Pattern.match(Record[1]):
                     if not EccGlobalData.gException.IsException(ERROR_NAMING_CONVENTION_CHECK_FUNCTION_NAME, Record[1]):
-                        EccGlobalData.gDb.TblReport.Insert(ERROR_NAMING_CONVENTION_CHECK_FUNCTION_NAME, OtherMsg = "The function name [%s] does not follow the rules" % (Record[1]), BelongsToTable = 'Function', BelongsToItem = Record[0])
+                        EccGlobalData.gDb.TblReport.Insert(ERROR_NAMING_CONVENTION_CHECK_FUNCTION_NAME, OtherMsg="The function name [%s] does not follow the rules" % (Record[1]), BelongsToTable='Function', BelongsToItem=Record[0])
 
     # Check whether NO use short variable name with single character
     def NamingConventionCheckSingleCharacterVariable(self, FileTable):
         if EccGlobalData.gConfig.NamingConventionCheckSingleCharacterVariable == '1' or EccGlobalData.gConfig.NamingConventionCheckAll == '1' or EccGlobalData.gConfig.CheckAll == '1':
             EdkLogger.quiet("Checking naming covention of single character variable name ...")
 
-            SqlCommand = """select ID, Name from %s where Model = %s""" %(FileTable, MODEL_IDENTIFIER_VARIABLE)
+            SqlCommand = """select ID, Name from %s where Model = %s""" % (FileTable, MODEL_IDENTIFIER_VARIABLE)
             RecordSet = EccGlobalData.gDb.TblFile.Exec(SqlCommand)
             for Record in RecordSet:
                 Variable = Record[1].replace('*', '')
                 if len(Variable) == 1:
                     if not EccGlobalData.gException.IsException(ERROR_NAMING_CONVENTION_CHECK_SINGLE_CHARACTER_VARIABLE, Record[1]):
-                        EccGlobalData.gDb.TblReport.Insert(ERROR_NAMING_CONVENTION_CHECK_SINGLE_CHARACTER_VARIABLE, OtherMsg = "The variable name [%s] does not follow the rules" % (Record[1]), BelongsToTable = FileTable, BelongsToItem = Record[0])
+                        EccGlobalData.gDb.TblReport.Insert(ERROR_NAMING_CONVENTION_CHECK_SINGLE_CHARACTER_VARIABLE, OtherMsg="The variable name [%s] does not follow the rules" % (Record[1]), BelongsToTable=FileTable, BelongsToItem=Record[0])
 
 ##
 #

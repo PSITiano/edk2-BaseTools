@@ -121,7 +121,7 @@ def GetLanguageCode(LangName, IsCompatibleMode, File):
         if length == 3 and LangName.isalpha():
             TempLangName = LangConvTable.get(LangName.lower())
             if TempLangName != None:
-               return TempLangName
+                return TempLangName
             return LangName
         else:
             EdkLogger.error("Unicode File Parser", FORMAT_INVALID, "Invalid ISO 639-2 language code : %s" % LangName, File)
@@ -193,6 +193,8 @@ class UniFileClassObject(object):
         self.Token = 2
         self.LanguageDef = []                   #[ [u'LanguageIdentifier', u'PrintableName'], ... ]
         self.OrderedStringList = {}             #{ u'LanguageIdentifier' : [StringDefClassObject]  }
+        self.OrderedStringDict = {}             #{ u'LanguageIdentifier' : {StringName:(IndexInList)}  }
+        self.OrderedStringListByToken = {}      #{ u'LanguageIdentifier' : {Token: StringDefClassObject} }
         self.IsCompatibleMode = IsCompatibleMode
         self.IncludePathList = IncludePathList
         if len(self.FileList) > 0:
@@ -246,20 +248,19 @@ class UniFileClassObject(object):
                     else:
                         OtherLang = FirstLangName
                     self.OrderedStringList[LangName].append (StringDefClassObject(Item.StringName, '', Item.Referenced, Item.Token, OtherLang))
-
+                    self.OrderedStringDict[LangName][Item.StringName] = len(self.OrderedStringList[LangName]) - 1
         return True
 
     #
     # Get String name and value
     #
     def GetStringObject(self, Item):
-        Name = ''
         Language = ''
         Value = ''
 
         Name = Item.split()[1]
         # Check the string name is the upper character
-        if not self.IsCompatibleMode and Name != '':
+        if Name != '':
             MatchString = re.match('[A-Z0-9_]+', Name, re.UNICODE)
             if MatchString == None or MatchString.end(0) != len(Name):
                 EdkLogger.error('Unicode File Parser', FORMAT_INVALID, 'The string token name %s defined in UNI file %s contains the invalid lower case character.' %(Name, self.File))
@@ -298,13 +299,36 @@ class UniFileClassObject(object):
         #
         # Use unique identifier
         #
+        FindFlag = -1
+        LineCount = 0
         for Line in FileIn:
+            Line = FileIn[LineCount]
+            LineCount += 1
             Line = Line.strip()
             #
             # Ignore comment line and empty line
             #
             if Line == u'' or Line.startswith(u'//'):
                 continue
+            
+            #
+            # Process comment embeded in string define lines
+            #
+            FindFlag = Line.find(u'//')
+            if FindFlag != -1:
+                Line = Line.replace(Line[FindFlag:], u' ')
+                if FileIn[LineCount].strip().startswith('#language'):
+                    Line = Line + FileIn[LineCount]
+                    FileIn[LineCount-1] = Line
+                    FileIn[LineCount] = os.linesep
+                    LineCount -= 1
+                    for Index in xrange (LineCount + 1, len (FileIn) - 1):
+                        if (Index == len(FileIn) -1):
+                            FileIn[Index] = os.linesep
+                        else:
+                            FileIn[Index] = FileIn[Index + 1]
+                    continue
+                              
             Line = Line.replace(u'/langdef', u'#langdef')
             Line = Line.replace(u'/string', u'#string')
             Line = Line.replace(u'/language', u'#language')
@@ -453,20 +477,22 @@ class UniFileClassObject(object):
             
         if Language not in self.OrderedStringList:
             self.OrderedStringList[Language] = []
+            self.OrderedStringDict[Language] = {}
 
         IsAdded = True
-        for Item in self.OrderedStringList[Language]:
-            if Name == Item.StringName:
-                IsAdded = False
-                if Value != None:
-                    Item.UpdateValue(Value)
-                    Item.UseOtherLangDef = ''
-                break
+        if Name in self.OrderedStringDict[Language]:
+            IsAdded = False
+            if Value != None:
+                ItemIndexInList = self.OrderedStringDict[Language][Name]
+                Item = self.OrderedStringList[Language][ItemIndexInList]
+                Item.UpdateValue(Value)
+                Item.UseOtherLangDef = ''   
 
         if IsAdded:
             Token = len(self.OrderedStringList[Language])
             if Index == -1:
                 self.OrderedStringList[Language].append(StringDefClassObject(Name, Value, Referenced, Token, UseOtherLangDef))
+                self.OrderedStringDict[Language][Name] = Token
                 for LangName in self.LanguageDef:
                     #
                     # New STRING token will be added into all language string lists.
@@ -478,8 +504,10 @@ class UniFileClassObject(object):
                         else:
                             OtherLangDef = Language
                         self.OrderedStringList[LangName[0]].append(StringDefClassObject(Name, '', Referenced, Token, OtherLangDef))
+                        self.OrderedStringDict[LangName[0]][Name] = len(self.OrderedStringList[LangName[0]]) - 1
             else:
                 self.OrderedStringList[Language].insert(Index, StringDefClassObject(Name, Value, Referenced, Token, UseOtherLangDef))
+                self.OrderedStringDict[Language][Name] = Index
 
     #
     # Set the string as referenced
@@ -490,17 +518,18 @@ class UniFileClassObject(object):
         # So, only update the status of string stoken in first language string list.
         #
         Lang = self.LanguageDef[0][0]
-        for Item in self.OrderedStringList[Lang]:
-            if Name == Item.StringName:
-                Item.Referenced = True
-                break
+        if Name in self.OrderedStringDict[Lang]:
+            ItemIndexInList = self.OrderedStringDict[Lang][Name]
+            Item = self.OrderedStringList[Lang][ItemIndexInList]
+            Item.Referenced = True
+
     #
     # Search the string in language definition by Name
     #
     def FindStringValue(self, Name, Lang):
-        for Item in self.OrderedStringList[Lang]:
-            if Item.StringName == Name:
-                return Item
+        if Name in self.OrderedStringDict[Lang]:
+            ItemIndexInList = self.OrderedStringDict[Lang][Name]
+            return self.OrderedStringList[Lang][ItemIndexInList]
 
         return None
 
@@ -523,6 +552,10 @@ class UniFileClassObject(object):
         #
         FirstLangName = self.LanguageDef[0][0]
 
+        # Convert the OrderedStringList to be OrderedStringListByToken in order to faciliate future search by token
+        for LangNameItem in self.LanguageDef:
+            self.OrderedStringListByToken[LangNameItem[0]] = {}
+
         #
         # Use small token for all referred string stoken.
         #
@@ -535,6 +568,7 @@ class UniFileClassObject(object):
                     OtherLangItem = self.OrderedStringList[LangName][Index]
                     OtherLangItem.Referenced = True
                     OtherLangItem.Token = RefToken
+                    self.OrderedStringListByToken[LangName][OtherLangItem.Token] = OtherLangItem
                 RefToken = RefToken + 1
 
         #
@@ -548,6 +582,7 @@ class UniFileClassObject(object):
                     LangName = LangNameItem[0]
                     OtherLangItem = self.OrderedStringList[LangName][Index]
                     OtherLangItem.Token = RefToken + UnRefToken
+                    self.OrderedStringListByToken[LangName][OtherLangItem.Token] = OtherLangItem
                 UnRefToken = UnRefToken + 1
 
     #
@@ -566,6 +601,6 @@ class UniFileClassObject(object):
 if __name__ == '__main__':
     EdkLogger.Initialize()
     EdkLogger.SetLevel(EdkLogger.DEBUG_0)
-    a = UniFileClassObject(['C:\\Edk\\Strings.uni', 'C:\\Edk\\Strings2.uni'])
+    a = UniFileClassObject([PathClass("C:\\Edk\\Strings.uni"), PathClass("C:\\Edk\\Strings2.uni")])
     a.ReToken()
     a.ShowMe()

@@ -1,7 +1,7 @@
 ## @file
 # process FFS generation from INF statement
 #
-#  Copyright (c) 2007 - 2010, Intel Corporation. All rights reserved.<BR>
+#  Copyright (c) 2007 - 2011, Intel Corporation. All rights reserved.<BR>
 #
 #  This program and the accompanying materials
 #  are licensed and made available under the terms and conditions of the BSD License
@@ -18,6 +18,8 @@
 import Rule
 import os
 import shutil
+import StringIO
+from struct import *
 from GenFdsGlobalVariable import GenFdsGlobalVariable
 import Ffs
 import subprocess
@@ -34,6 +36,7 @@ from Common.BuildToolError import *
 from GuidSection import GuidSection
 from FvImageSection import FvImageSection
 from Common.Misc import PeImageClass
+from AutoGen.GenDepex import DependencyExpression
 
 ## generate FFS from INF
 #
@@ -50,8 +53,82 @@ class FfsInfStatement(FfsInfStatementClassObject):
         self.KeepRelocFromRule = None
         self.InDsc = True
         self.OptRomDefs = {}
-        self.PiSpecVersion = 0
-        
+        self.PiSpecVersion = '0x00000000'
+        self.InfModule = None
+        self.FinalTargetSuffixMap = {}
+        self.CurrentLineNum = None
+        self.CurrentLineContent = None
+        self.FileName = None
+        self.InfFileName = None
+
+    ## GetFinalTargetSuffixMap() method
+    #
+    #    Get final build target list
+    def GetFinalTargetSuffixMap(self):
+        if not self.InfModule or not self.CurrentArch:
+            return []
+        if not self.FinalTargetSuffixMap:
+            FinalBuildTargetList = GenFdsGlobalVariable.GetModuleCodaTargetList(self.InfModule, self.CurrentArch)
+            for File in FinalBuildTargetList:
+                self.FinalTargetSuffixMap.setdefault(os.path.splitext(File)[1], []).append(File)
+
+            # Check if current INF module has DEPEX
+            if '.depex' not in self.FinalTargetSuffixMap and self.InfModule.ModuleType != "USER_DEFINED" \
+                and not self.InfModule.DxsFile and not self.InfModule.LibraryClass:
+                ModuleType = self.InfModule.ModuleType
+                PlatformDataBase = GenFdsGlobalVariable.WorkSpace.BuildObject[GenFdsGlobalVariable.ActivePlatform, self.CurrentArch, GenFdsGlobalVariable.TargetName, GenFdsGlobalVariable.ToolChainTag]
+
+                if ModuleType != DataType.SUP_MODULE_USER_DEFINED:
+                    for LibraryClass in PlatformDataBase.LibraryClasses.GetKeys():
+                        if LibraryClass.startswith("NULL") and PlatformDataBase.LibraryClasses[LibraryClass, ModuleType]:
+                            self.InfModule.LibraryClasses[LibraryClass] = PlatformDataBase.LibraryClasses[LibraryClass, ModuleType]
+
+                StrModule = str(self.InfModule)
+                PlatformModule = None
+                if StrModule in PlatformDataBase.Modules:
+                    PlatformModule = PlatformDataBase.Modules[StrModule]
+                    for LibraryClass in PlatformModule.LibraryClasses:
+                        if LibraryClass.startswith("NULL"):
+                            self.InfModule.LibraryClasses[LibraryClass] = PlatformModule.LibraryClasses[LibraryClass]
+
+                DependencyList = [self.InfModule]
+                LibraryInstance = {}
+                DepexList = []
+                while len(DependencyList) > 0:
+                    Module = DependencyList.pop(0)
+                    if not Module:
+                        continue
+                    for Dep in Module.Depex[self.CurrentArch, ModuleType]:
+                        if DepexList != []:
+                            DepexList.append('AND')
+                        DepexList.append('(')
+                        DepexList.extend(Dep)
+                        if DepexList[-1] == 'END':  # no need of a END at this time
+                            DepexList.pop()
+                        DepexList.append(')')
+                    if 'BEFORE' in DepexList or 'AFTER' in DepexList:
+                        break
+                    for LibName in Module.LibraryClasses:
+                        if LibName in LibraryInstance:
+                            continue
+                        if PlatformModule and LibName in PlatformModule.LibraryClasses:
+                            LibraryPath = PlatformModule.LibraryClasses[LibName]
+                        else:
+                            LibraryPath = PlatformDataBase.LibraryClasses[LibName, ModuleType]
+                        if not LibraryPath:
+                            LibraryPath = Module.LibraryClasses[LibName]
+                        if not LibraryPath:
+                            continue
+                        LibraryModule = GenFdsGlobalVariable.WorkSpace.BuildObject[LibraryPath, self.CurrentArch, GenFdsGlobalVariable.TargetName, GenFdsGlobalVariable.ToolChainTag]
+                        LibraryInstance[LibName] = LibraryModule
+                        DependencyList.append(LibraryModule)
+                if DepexList:
+                    Dpx = DependencyExpression(DepexList, ModuleType, True)
+                    if len(Dpx.PostfixNotation) != 0:
+                        # It means this module has DEPEX
+                        self.FinalTargetSuffixMap['.depex'] = [os.path.join(self.EfiOutputPath, self.BaseName) + '.depex']
+        return self.FinalTargetSuffixMap
+
     ## __InfParse() method
     #
     #   Parse inf file to get module information
@@ -86,7 +163,7 @@ class FfsInfStatement(FfsInfStatementClassObject):
         
         if self.CurrentArch != None:
 
-            Inf = GenFdsGlobalVariable.WorkSpace.BuildObject[PathClassObj, self.CurrentArch]
+            Inf = GenFdsGlobalVariable.WorkSpace.BuildObject[PathClassObj, self.CurrentArch, GenFdsGlobalVariable.TargetName, GenFdsGlobalVariable.ToolChainTag]
             #
             # Set Ffs BaseName, MdouleGuid, ModuleType, Version, OutputPath
             #
@@ -104,7 +181,7 @@ class FfsInfStatement(FfsInfStatementClassObject):
                 self.ShadowFromInfFile = Inf.Shadow
 
         else:
-            Inf = GenFdsGlobalVariable.WorkSpace.BuildObject[PathClassObj, 'COMMON']
+            Inf = GenFdsGlobalVariable.WorkSpace.BuildObject[PathClassObj, 'COMMON', GenFdsGlobalVariable.TargetName, GenFdsGlobalVariable.ToolChainTag]
             self.BaseName = Inf.BaseName
             self.ModuleGuid = Inf.Guid
             self.ModuleType = Inf.ModuleType
@@ -121,11 +198,13 @@ class FfsInfStatement(FfsInfStatementClassObject):
         if len(self.SourceFileList) != 0 and not self.InDsc:
             EdkLogger.warn("GenFds", GENFDS_ERROR, "Module %s NOT found in DSC file; Is it really a binary module?" % (self.InfFileName))
 
-        if self.ModuleType == 'SMM_CORE' and self.PiSpecVersion < 0x0001000A:
+        if self.ModuleType == 'SMM_CORE' and int(self.PiSpecVersion, 16) < 0x0001000A:
             EdkLogger.error("GenFds", FORMAT_NOT_SUPPORTED, "SMM_CORE module type can't be used in the module with PI_SPECIFICATION_VERSION less than 0x0001000A", File=self.InfFileName)      
 
         if Inf._Defs != None and len(Inf._Defs) > 0:
             self.OptRomDefs.update(Inf._Defs)
+        
+        self.InfModule = Inf
             
         GenFdsGlobalVariable.VerboseLogger( "BaseName : %s" %self.BaseName)
         GenFdsGlobalVariable.VerboseLogger("ModuleGuid : %s" %self.ModuleGuid)
@@ -177,13 +256,13 @@ class FfsInfStatement(FfsInfStatementClassObject):
         #
         # Convert Fv File Type for PI1.1 SMM driver.
         #
-        if self.ModuleType == 'DXE_SMM_DRIVER' and self.PiSpecVersion >= 0x0001000A:
+        if self.ModuleType == 'DXE_SMM_DRIVER' and int(self.PiSpecVersion, 16) >= 0x0001000A:
             if Rule.FvFileType == 'DRIVER':
                 Rule.FvFileType = 'SMM'
         #
         # Framework SMM Driver has no SMM FV file type
         #
-        if self.ModuleType == 'DXE_SMM_DRIVER' and self.PiSpecVersion < 0x0001000A:
+        if self.ModuleType == 'DXE_SMM_DRIVER' and int(self.PiSpecVersion, 16) < 0x0001000A:
             if Rule.FvFileType == 'SMM' or Rule.FvFileType == 'SMM_CORE':
                 EdkLogger.error("GenFds", FORMAT_NOT_SUPPORTED, "Framework SMM module doesn't support SMM or SMM_CORE FV file type", File=self.InfFileName)
         #
@@ -284,27 +363,27 @@ class FfsInfStatement(FfsInfStatementClassObject):
 
         InfFileKey = os.path.normpath(os.path.join(GenFdsGlobalVariable.WorkSpaceDir, self.InfFileName))
         DscArchList = []
-        PlatformDataBase = GenFdsGlobalVariable.WorkSpace.BuildObject[GenFdsGlobalVariable.ActivePlatform, 'IA32']
+        PlatformDataBase = GenFdsGlobalVariable.WorkSpace.BuildObject[GenFdsGlobalVariable.ActivePlatform, 'IA32', GenFdsGlobalVariable.TargetName, GenFdsGlobalVariable.ToolChainTag]
         if  PlatformDataBase != None:
             if InfFileKey in PlatformDataBase.Modules:
                 DscArchList.append ('IA32')
 
-        PlatformDataBase = GenFdsGlobalVariable.WorkSpace.BuildObject[GenFdsGlobalVariable.ActivePlatform, 'X64']
+        PlatformDataBase = GenFdsGlobalVariable.WorkSpace.BuildObject[GenFdsGlobalVariable.ActivePlatform, 'X64', GenFdsGlobalVariable.TargetName, GenFdsGlobalVariable.ToolChainTag]
         if  PlatformDataBase != None:
             if InfFileKey in PlatformDataBase.Modules:
                 DscArchList.append ('X64')
 
-        PlatformDataBase = GenFdsGlobalVariable.WorkSpace.BuildObject[GenFdsGlobalVariable.ActivePlatform, 'IPF']
+        PlatformDataBase = GenFdsGlobalVariable.WorkSpace.BuildObject[GenFdsGlobalVariable.ActivePlatform, 'IPF', GenFdsGlobalVariable.TargetName, GenFdsGlobalVariable.ToolChainTag]
         if PlatformDataBase != None:
             if InfFileKey in (PlatformDataBase.Modules):
                 DscArchList.append ('IPF')
 
-        PlatformDataBase = GenFdsGlobalVariable.WorkSpace.BuildObject[GenFdsGlobalVariable.ActivePlatform, 'ARM']
+        PlatformDataBase = GenFdsGlobalVariable.WorkSpace.BuildObject[GenFdsGlobalVariable.ActivePlatform, 'ARM', GenFdsGlobalVariable.TargetName, GenFdsGlobalVariable.ToolChainTag]
         if PlatformDataBase != None:
             if InfFileKey in (PlatformDataBase.Modules):
                 DscArchList.append ('ARM')
 
-        PlatformDataBase = GenFdsGlobalVariable.WorkSpace.BuildObject[GenFdsGlobalVariable.ActivePlatform, 'EBC']
+        PlatformDataBase = GenFdsGlobalVariable.WorkSpace.BuildObject[GenFdsGlobalVariable.ActivePlatform, 'EBC', GenFdsGlobalVariable.TargetName, GenFdsGlobalVariable.ToolChainTag]
         if PlatformDataBase != None:
             if InfFileKey in (PlatformDataBase.Modules):
                 DscArchList.append ('EBC')
@@ -377,7 +456,7 @@ class FfsInfStatement(FfsInfStatementClassObject):
         Arch = ''
         OutputPath = ''
         (ModulePath, FileName) = os.path.split(self.InfFileName)
-        Index = FileName.find('.')
+        Index = FileName.rfind('.')
         FileName = FileName[0:Index]
         Arch = "NoneArch"
         if self.CurrentArch != None:
@@ -421,13 +500,13 @@ class FfsInfStatement(FfsInfStatementClassObject):
         #
         # Convert Fv Section Type for PI1.1 SMM driver.
         #
-        if self.ModuleType == 'DXE_SMM_DRIVER' and self.PiSpecVersion >= 0x0001000A:
+        if self.ModuleType == 'DXE_SMM_DRIVER' and int(self.PiSpecVersion, 16) >= 0x0001000A:
             if SectionType == 'DXE_DEPEX':
                 SectionType = 'SMM_DEPEX'
         #
         # Framework SMM Driver has no SMM_DEPEX section type
         #
-        if self.ModuleType == 'DXE_SMM_DRIVER' and self.PiSpecVersion < 0x0001000A:
+        if self.ModuleType == 'DXE_SMM_DRIVER' and int(self.PiSpecVersion, 16) < 0x0001000A:
             if SectionType == 'SMM_DEPEX':
                 EdkLogger.error("GenFds", FORMAT_NOT_SUPPORTED, "Framework SMM module doesn't support SMM_DEPEX section type", File=self.InfFileName)
         NoStrip = True
@@ -583,19 +662,20 @@ class FfsInfStatement(FfsInfStatementClassObject):
         SectFiles = []
         SectAlignments = []
         Index = 1
+        HasGneratedFlag = False
         for Sect in Rule.SectionList:
             SecIndex = '%d' %Index
             SectList  = []
             #
             # Convert Fv Section Type for PI1.1 SMM driver.
             #
-            if self.ModuleType == 'DXE_SMM_DRIVER' and self.PiSpecVersion >= 0x0001000A:
+            if self.ModuleType == 'DXE_SMM_DRIVER' and int(self.PiSpecVersion, 16) >= 0x0001000A:
                 if Sect.SectionType == 'DXE_DEPEX':
                     Sect.SectionType = 'SMM_DEPEX'
             #
             # Framework SMM Driver has no SMM_DEPEX section type
             #
-            if self.ModuleType == 'DXE_SMM_DRIVER' and self.PiSpecVersion < 0x0001000A:
+            if self.ModuleType == 'DXE_SMM_DRIVER' and int(self.PiSpecVersion, 16) < 0x0001000A:
                 if Sect.SectionType == 'SMM_DEPEX':
                     EdkLogger.error("GenFds", FORMAT_NOT_SUPPORTED, "Framework SMM module doesn't support SMM_DEPEX section type", File=self.InfFileName)
             #
@@ -613,6 +693,51 @@ class FfsInfStatement(FfsInfStatementClassObject):
                 SectList, Align = Sect.GenSection(self.OutputPath , self.ModuleGuid, SecIndex, Rule.KeyStringList, self)
             else :
                 SectList, Align = Sect.GenSection(self.OutputPath , self.ModuleGuid, SecIndex, self.KeyStringList, self)
+            
+            if not HasGneratedFlag:
+                UniVfrOffsetFileSection = ""    
+                ModuleFileName = os.path.join(GenFdsGlobalVariable.WorkSpaceDir, self.InfFileName)
+                InfData = GenFdsGlobalVariable.WorkSpace.BuildObject[PathClass(ModuleFileName), self.CurrentArch]
+                #
+                # Search the source list in InfData to find if there are .vfr file exist.
+                #
+                VfrUniBaseName = {}
+                VfrUniOffsetList = []
+                for SourceFile in InfData.Sources:
+                    if SourceFile.Type.upper() == ".VFR" :
+                        #
+                        # search the .map file to find the offset of vfr binary in the PE32+/TE file. 
+                        #
+                        VfrUniBaseName[SourceFile.BaseName] = (SourceFile.BaseName + "Bin")
+                    if SourceFile.Type.upper() == ".UNI" :
+                        #
+                        # search the .map file to find the offset of Uni strings binary in the PE32+/TE file. 
+                        #
+                        VfrUniBaseName["UniOffsetName"] = (self.BaseName + "Strings")
+                    
+                
+                if len(VfrUniBaseName) > 0:
+                    VfrUniOffsetList = self.__GetBuildOutputMapFileVfrUniInfo(VfrUniBaseName)
+                    #
+                    # Generate the Raw data of raw section
+                    #
+                    os.path.join( self.OutputPath, self.BaseName + '.offset')
+                    UniVfrOffsetFileName    =  os.path.join( self.OutputPath, self.BaseName + '.offset')
+                    UniVfrOffsetFileSection =  os.path.join( self.OutputPath, self.BaseName + 'Offset' + '.raw')
+                    
+                    self.__GenUniVfrOffsetFile (VfrUniOffsetList, UniVfrOffsetFileName)
+                    
+                    UniVfrOffsetFileNameList = []
+                    UniVfrOffsetFileNameList.append(UniVfrOffsetFileName)
+                    """Call GenSection"""
+                    GenFdsGlobalVariable.GenerateSection(UniVfrOffsetFileSection,
+                                                         UniVfrOffsetFileNameList,
+                                                         "EFI_SECTION_RAW"
+                                                         )
+                    os.remove(UniVfrOffsetFileName)         
+                    SectList.append(UniVfrOffsetFileSection)
+                    HasGneratedFlag = True
+                
             for SecName in  SectList :
                 SectFiles.append(SecName)
                 SectAlignments.append(Align)
@@ -672,3 +797,116 @@ class FfsInfStatement(FfsInfStatementClassObject):
             result += ('-a', Rule.Alignment)
 
         return result
+ 
+    ## __GetBuildOutputMapFileVfrUniInfo() method
+    #
+    #   Find the offset of UNI/INF object offset in the EFI image file.
+    #
+    #   @param  self                  The object pointer
+    #   @param  VfrUniBaseName        A name list contain the UNI/INF object name.
+    #   @retval RetValue              A list contain offset of UNI/INF object.
+    #    
+    def __GetBuildOutputMapFileVfrUniInfo(self, VfrUniBaseName):
+        
+        RetValue = []
+        
+        MapFileName = os.path.join(self.EfiOutputPath, self.BaseName + ".map")
+        try:
+            fInputfile = open(MapFileName, "r", 0)
+            try:
+                FileLinesList = fInputfile.readlines()
+            except:
+                EdkLogger.error("GenFds", FILE_READ_FAILURE, "File read failed for %s" %MapFileName,None)
+            finally:
+                fInputfile.close()
+        except:
+            EdkLogger.error("GenFds", FILE_OPEN_FAILURE, "File open failed for %s" %MapFileName,None)
+        
+        IsHex = False
+        for eachLine in FileLinesList:
+            for eachName in VfrUniBaseName.values():
+                if eachLine.find(eachName) != -1:
+                    eachLine = eachLine.strip()
+                    Element  = eachLine.split()
+                    #
+                    # MSFT/ICC/EBC map file
+                    #
+                    if (len(Element) == 4):
+                        try:
+                            int (Element[2], 16)
+                            IsHex = True
+                        except:
+                            IsHex = False
+                    
+                        if IsHex:
+                            RetValue.append((eachName, Element[2]))
+                            IsHex = False
+                    #
+                    # GCC map file
+                    #
+                    elif (len(Element) == 2) and Element[0].startswith("0x"):
+                        RetValue.append((eachName, Element[0]))
+        
+        return RetValue
+    
+    ## __GenUniVfrOffsetFile() method
+    #
+    #   Generate the offset file for the module which contain VFR or UNI file.
+    #
+    #   @param  self                    The object pointer
+    #   @param  VfrUniOffsetList        A list contain the VFR/UNI offsets in the EFI image file.
+    #   @param  UniVfrOffsetFileName    The output offset file name.
+    #
+    def __GenUniVfrOffsetFile(self, VfrUniOffsetList, UniVfrOffsetFileName):
+        
+        try:
+            fInputfile = open(UniVfrOffsetFileName, "wb+", 0)
+        except:
+            EdkLogger.error("GenFds", FILE_OPEN_FAILURE, "File open failed for %s" %UniVfrOffsetFileName,None)
+            
+        # Use a instance of StringIO to cache data
+        fStringIO = StringIO.StringIO('')  
+        
+        for Item in VfrUniOffsetList:
+            if (Item[0].find("Strings") != -1):
+                #
+                # UNI offset in image.
+                # GUID + Offset
+                # { 0x8913c5e0, 0x33f6, 0x4d86, { 0x9b, 0xf1, 0x43, 0xef, 0x89, 0xfc, 0x6, 0x66 } }
+                #
+                UniGuid = [0xe0, 0xc5, 0x13, 0x89, 0xf6, 0x33, 0x86, 0x4d, 0x9b, 0xf1, 0x43, 0xef, 0x89, 0xfc, 0x6, 0x66]
+                UniGuid = [chr(ItemGuid) for ItemGuid in UniGuid]
+                fStringIO.write(''.join(UniGuid))            
+                UniValue = pack ('Q', int (Item[1], 16))
+                fStringIO.write (UniValue)
+            else:
+                #
+                # VFR binary offset in image.
+                # GUID + Offset
+                # { 0xd0bc7cb4, 0x6a47, 0x495f, { 0xaa, 0x11, 0x71, 0x7, 0x46, 0xda, 0x6, 0xa2 } };
+                #
+                VfrGuid = [0xb4, 0x7c, 0xbc, 0xd0, 0x47, 0x6a, 0x5f, 0x49, 0xaa, 0x11, 0x71, 0x7, 0x46, 0xda, 0x6, 0xa2]
+                VfrGuid = [chr(ItemGuid) for ItemGuid in VfrGuid]
+                fStringIO.write(''.join(VfrGuid))                   
+                type (Item[1]) 
+                VfrValue = pack ('Q', int (Item[1], 16))
+                fStringIO.write (VfrValue)
+            
+        #
+        # write data into file.
+        #
+        try :  
+            fInputfile.write (fStringIO.getvalue())
+        except:
+            EdkLogger.error("GenFds", FILE_WRITE_FAILURE, "Write data to file %s failed, please check whether the file been locked or using by other applications." %UniVfrOffsetFileName,None)
+        
+        fStringIO.close ()
+        fInputfile.close ()
+        
+                
+                    
+            
+            
+        
+                                
+        

@@ -1,6 +1,6 @@
 /**
 
-Copyright (c) 1999 - 2010, Intel Corporation. All rights reserved.<BR>
+Copyright (c) 1999 - 2011, Intel Corporation. All rights reserved.<BR>
 This program and the accompanying materials are licensed and made available 
 under the terms and conditions of the BSD License which accompanies this 
 distribution.  The full text of the license may be found at
@@ -119,27 +119,36 @@ Returns:
 
 --*/
 {
-  CHAR8  StrPtr[40];
-  CHAR8  *Token;
+  CHAR8  TemStr[5] = "0000";
   unsigned Major;
   unsigned Minor;
+  UINTN Length;
 
   Major = 0;
   Minor = 0;
-  memset (StrPtr, 0, 40);
-  Token = strtok (Str, ".");
 
-  while (Token != NULL) {
-    strcat (StrPtr, Token);
-    Token = strtok (NULL, ".");
+  if (strstr (Str, ".") != NULL) {
+    sscanf (
+      Str,
+      "%02x.%02x",
+      &Major,
+      &Minor
+      );
+  } else {
+    Length = strlen(Str);
+    if (Length < 4) {
+      strncpy (TemStr + 4 - Length, Str, Length);
+    } else {
+      strncpy (TemStr, Str + Length - 4, 4);
+    }
+  
+    sscanf (
+      TemStr,
+      "%02x%02x",
+      &Major,
+      &Minor
+      );
   }
-
-  sscanf (
-    StrPtr,
-    "%02d%02d",
-    &Major,
-    &Minor
-    );
 
   *MajorVer = (UINT8) Major;
   *MinorVer = (UINT8) Minor;
@@ -1132,7 +1141,6 @@ Returns:
   EFI_STATUS  Status;
   UINT64      CompStartAddress;
   UINT64      FileSize;
-  UINT64      NumByteRead;
   UINT64      NumAdjustByte;
   UINT8       *Buffer;
   FILE        *Fp;
@@ -1180,7 +1188,7 @@ Returns:
     //
     // Read first 64 bytes of PAL header and use it to find version info
     //
-    NumByteRead = fread (Buffer, sizeof (UINT8), SIZE_OF_PAL_HEADER, Fp);
+    fread (Buffer, sizeof (UINT8), SIZE_OF_PAL_HEADER, Fp);
 
     //
     // PAL header contains the version info. Currently, we will use the header
@@ -1191,7 +1199,7 @@ Returns:
     }
   }
 
-  NumByteRead = fread (Buffer, sizeof (UINT8), (UINTN) FileSize, Fp);
+  fread (Buffer, sizeof (UINT8), (UINTN) FileSize, Fp);
   fclose (Fp);
 
   //
@@ -1320,7 +1328,6 @@ Returns:
   UINT64      AbsAddress;
   UINTN       RelativeAddress;
   UINT64      FileSize;
-  UINT64      NumByteRead;
   UINT8       *Buffer;
   FILE        *Fp;
   FIT_TABLE   *PalFitPtr;
@@ -1358,7 +1365,7 @@ Returns:
   //
   // Read, Get version Info and discard the PAL header.
   //
-  NumByteRead = fread (Buffer, sizeof (UINT8), SIZE_OF_PAL_HEADER, Fp);
+  fread (Buffer, sizeof (UINT8), SIZE_OF_PAL_HEADER, Fp);
 
   //
   // Extract the version info from header of PAL_A. Once done, discrad this buffer
@@ -1370,7 +1377,7 @@ Returns:
   //
   // Read PAL_A file in a buffer
   //
-  NumByteRead = fread (Buffer, sizeof (UINT8), (UINTN) FileSize, Fp);
+  fread (Buffer, sizeof (UINT8), (UINTN) FileSize, Fp);
   fclose (Fp);
 
   PalStartAddress       = Fv1EndAddress - (SIZE_TO_OFFSET_PAL_A_END + FileSize);
@@ -1750,7 +1757,6 @@ Returns:
   UINT8 *Buffer;
   UINT8 *LocalVtfBuffer;
   UINTN FileSize;
-  UINTN NumByteRead;
   FILE  *Fp;
 
   if (!strcmp (FileName, "")) {
@@ -1775,7 +1781,7 @@ Returns:
     return EFI_OUT_OF_RESOURCES;
   }
 
-  NumByteRead     = fread (Buffer, sizeof (UINT8), FileSize, Fp);
+  fread (Buffer, sizeof (UINT8), FileSize, Fp);
 
   LocalVtfBuffer  = (UINT8 *) Vtf1EndBuffer - SIZE_IA32_RESET_VECT;
   memcpy (LocalVtfBuffer, Buffer, FileSize);
@@ -2112,7 +2118,6 @@ Returns:
   FILE        *Fp;
   UINT64      *StartAddressPtr;
   UINTN       FirstFwVSize;
-  UINTN       NumByte;
 
   StartAddressPtr   = malloc (sizeof (UINT64));
   if (StartAddressPtr == NULL) {
@@ -2132,7 +2137,7 @@ Returns:
 
   FirstFwVSize = _filelength (fileno (Fp));
   fseek (Fp, (long) (FirstFwVSize - (UINTN) (SIZE_IA32_RESET_VECT + SIZE_SALE_ENTRY_POINT)), SEEK_SET);
-  NumByte = fwrite ((VOID *) StartAddressPtr, sizeof (UINT64), 1, Fp);
+  fwrite ((VOID *) StartAddressPtr, sizeof (UINT64), 1, Fp);
 
   if (Fp) {
     fclose (Fp);
@@ -2374,7 +2379,7 @@ Returns:
 
 --*/
 {
-  fprintf (stdout, "%s Version %d.%d\n", UTILITY_NAME, UTILITY_MAJOR_VERSION, UTILITY_MINOR_VERSION);
+  fprintf (stdout, "%s Version %d.%d %s \n", UTILITY_NAME, UTILITY_MAJOR_VERSION, UTILITY_MINOR_VERSION, __BUILD_VERSION);
 }
 
 VOID
